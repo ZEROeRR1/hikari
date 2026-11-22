@@ -20,13 +20,16 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import okhttp3.ConnectionPool
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+import okhttp3.Protocol
 import okhttp3.Request
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
 import java.nio.ByteBuffer
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 import javax.crypto.Cipher
@@ -64,13 +67,23 @@ object DownloadEngine {
     private const val BUFFER = 1 shl 16
     private const val MAX_MEM_SEGMENT = 96L * 1024 * 1024
 
-    private const val SEGMENT_CONCURRENCY = 8
+    private const val SEGMENT_CONCURRENCY = 12
 
     /** First-contact part count for multi-connection direct downloads (1DM
      *  parity): stepped down per host on throttle signals, remembered after,
      *  so a strong host + fast line runs at the ceiling and a strict host
      *  still runs at the fastest IT allows. */
     private const val MULTI_START_PARTS = 16
+
+    /** Dedicated download client: forces HTTP/1.1 so parallel parts/segments
+     *  open separate TCP connections instead of multiplexing over one HTTP/2
+     *  socket, and expands the connection pool for concurrent HLS workers. */
+    private val downloadClient by lazy {
+        PlayerHttp.client.newBuilder()
+            .protocols(listOf(Protocol.HTTP_1_1))
+            .connectionPool(ConnectionPool(32, 5, TimeUnit.MINUTES))
+            .build()
+    }
 
     /** Smallest a part may be (a 10 MB file splits into 5, not 16 slivers). */
     private const val PART_MIN_BYTES = 2L * 1024 * 1024
@@ -617,13 +630,28 @@ object DownloadEngine {
      *  split is impossible without it — the single stream takes over). */
     private suspend fun probeLength(url: String, headers: Map<String, String>, ua: String): Long =
         withContext(Dispatchers.IO) {
-            val req = Request.Builder().url(url)
-            applyHeaders(req, headers, ua)
-            req.header("Range", "bytes=0-0")
-            PlayerHttp.client.newCall(req.build()).execute().use { resp ->
-                if (resp.code != 206) return@withContext -1L
-                val cr = resp.header("Content-Range") ?: return@withContext -1L
-                cr.substringAfter('/').trim().toLongOrNull()?.takeIf { it > 0L } ?: -1L
+            // Pass 1: Range bytes=0-0 (most reliable confirmation of 206 support)
+            val rangeReq = Request.Builder().url(url).apply {
+                applyHeaders(this, headers, ua)
+                header("Range", "bytes=0-0")
+            }.build()
+            downloadClient.newCall(rangeReq).execute().use { resp ->
+                if (resp.code == 206) {
+                    val cr = resp.header("Content-Range")
+                    val total = cr?.substringAfter('/')?.trim()?.toLongOrNull()
+                    if (total != null && total > 0L) return@withContext total
+                }
+            }
+
+            // Pass 2: HEAD fallback for CDNs that dislike 1-byte ranges
+            val headReq = Request.Builder().url(url).head().apply {
+                applyHeaders(this, headers, ua)
+            }.build()
+            downloadClient.newCall(headReq).execute().use { resp ->
+                if (!resp.isSuccessful) return@withContext -1L
+                val acceptRanges = resp.header("Accept-Ranges")
+                if (acceptRanges.equals("none", ignoreCase = true)) return@withContext -1L
+                resp.header("Content-Length")?.trim()?.toLongOrNull()?.takeIf { it > 0L } ?: -1L
             }
         }
 
@@ -702,7 +730,7 @@ object DownloadEngine {
             applyHeaders(req, headers, ua)
             req.header("Range", "bytes=${start + have}-$end")
             try {
-                PlayerHttp.client.newCall(req.build()).execute().use { resp ->
+                downloadClient.newCall(req.build()).execute().use { resp ->
                     val code = resp.code
                     if (code == 429 || code == 503) throw ThrottledException()
                     if (code == 200) throw RangeUnsupportedException()
@@ -774,7 +802,7 @@ object DownloadEngine {
             var code = -1
             var retryAfter: String? = null
             try {
-                PlayerHttp.client.newCall(req.build()).execute().use { resp ->
+                downloadClient.newCall(req.build()).execute().use { resp ->
                     code = resp.code
                     if (code == 429) {
                         retryAfter = resp.header("Retry-After")
@@ -1361,7 +1389,7 @@ object DownloadEngine {
             val req = Request.Builder().url(url)
             applyHeaders(req, headers, ua)
             if (byteRange != null) req.header("Range", "bytes=${byteRange.first}-${byteRange.second}")
-            PlayerHttp.client.newCall(req.build()).execute().use { resp ->
+            downloadClient.newCall(req.build()).execute().use { resp ->
                 if (resp.code == 429) {
                     val ra = resp.header("Retry-After")
                     resp.close()
@@ -1373,7 +1401,7 @@ object DownloadEngine {
                     resp.close()
                     val fresh = Request.Builder().url(url)
                     applyHeaders(fresh, headers, ua)
-                    PlayerHttp.client.newCall(fresh.build()).execute().use { r2 ->
+                    downloadClient.newCall(fresh.build()).execute().use { r2 ->
                         if (r2.code == 429) {
                             val ra = r2.header("Retry-After")
                             r2.close()
