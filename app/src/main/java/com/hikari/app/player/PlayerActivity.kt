@@ -19653,7 +19653,6 @@ class PlayerActivity : ComponentActivity() {
         // rather than leaving them on a player that is playing nothing.
         leaveAfterDownloadPick()
     }
-
     private fun openInExternalManager() {
         val src = sources.getOrNull(currentIndex)
         if (src == null || src.url.isBlank() || src.isTorrent || src.torrentStream) {
@@ -19662,10 +19661,60 @@ class PlayerActivity : ComponentActivity() {
         }
         runCatching {
             val uri = android.net.Uri.parse(src.url)
-            val view = android.content.Intent(android.content.Intent.ACTION_VIEW, uri)
-            view.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
-            view.addCategory(android.content.Intent.CATEGORY_BROWSABLE)
-            startActivity(android.content.Intent.createChooser(view, src.url.substringAfterLast("/").take(80)))
+            val fileName = buildString {
+                append(playingTitle.ifBlank { "video" })
+                val ep = episodeLabel()
+                if (ep.isNotBlank()) append(" - ").append(ep)
+            }.replace(Regex("[\\\\/:*?\"<>|]"), " ").trim().take(80)
+
+            val view = android.content.Intent(android.content.Intent.ACTION_VIEW, uri).apply {
+                addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                // Pre-fill filename in 1DM+ editor
+                if (fileName.isNotBlank()) {
+                    putExtra("extra_filename", fileName)
+                    putExtra("title", fileName)
+                }
+                // Pass HTTP headers (Referer, User-Agent, Cookie) so CDNs don't block 1DM+
+                if (src.headers.isNotEmpty()) {
+                    val headerBundle = android.os.Bundle()
+                    src.headers.forEach { (k, v) -> headerBundle.putString(k, v) }
+                    putExtra("android.media.intent.extra.HTTP_HEADERS", headerBundle)
+                    putExtra("extra_headers", headerBundle)
+                }
+            }
+
+            val idmPackages = listOf(
+                "idm.internet.download.manager.plus",     // 1DM+
+                "idm.internet.download.manager",          // 1DM (Free)
+                "idm.internet.download.manager.adm.lite"  // 1DM Lite
+            )
+            val idmActivity = "idm.internet.download.manager.Downloader"
+
+            val installedIdm = idmPackages.firstOrNull { pkg ->
+                try {
+                    packageManager.getPackageInfo(pkg, 0)
+                    true
+                } catch (_: android.content.pm.PackageManager.NameNotFoundException) {
+                    false
+                }
+            }
+
+            if (installedIdm != null) {
+                try {
+                    // Launch 1DM+ editor directly
+                    view.component = android.content.ComponentName(installedIdm, idmActivity)
+                    startActivity(view)
+                } catch (_: Exception) {
+                    // Fallback to package-level intent if activity name ever changes
+                    view.component = null
+                    view.setPackage(installedIdm)
+                    startActivity(view)
+                }
+            } else {
+                // Fallback to normal Android chooser if 1DM isn't installed
+                view.addCategory(android.content.Intent.CATEGORY_BROWSABLE)
+                startActivity(android.content.Intent.createChooser(view, fileName.ifBlank { src.url.substringAfterLast("/").take(80) }))
+            }
         }.onFailure {
             runCatching {
                 Toast.makeText(this, I18n.t("No app can open this link."), Toast.LENGTH_SHORT).show()
@@ -19673,6 +19722,8 @@ class PlayerActivity : ComponentActivity() {
         }
         leaveAfterDownloadPick()
     }
+
+    
 
     private fun requestNotificationPermission() {
         if (Build.VERSION.SDK_INT < 33) return
