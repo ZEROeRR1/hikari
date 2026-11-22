@@ -88,6 +88,10 @@
         <intent>
             <action android:name="android.intent.action.TTS_SERVICE" />
         </intent>
+        <package android:name="idm.internet.download.manager.plus" />
+        <package android:name="idm.internet.download.manager" />
+        <package android:name="idm.internet.download.manager.adm.lite" />
+
     </queries>
 
     <application
