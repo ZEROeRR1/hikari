@@ -239,7 +239,7 @@ jobs:
 
           run_gradle() {
             : > gradle-build.log
-            setsid gradle assembleDebug assembleRelease --no-daemon --stacktrace --console=plain \
+            setsid gradle assembleRelease --no-daemon --stacktrace --console=plain \
               -Dorg.gradle.internal.http.connectionTimeout=30000 \
               -Dorg.gradle.internal.http.socketTimeout=60000 \
               -Dorg.gradle.internal.repository.max.tentatives=5 \
