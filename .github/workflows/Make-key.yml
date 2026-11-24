@@ -1,0 +1,44 @@
+name: Make Signing Key
+
+on:
+  workflow_dispatch:
+    inputs:
+      password:
+        description: "Choose a password (min 6 characters, remember this!)"
+        required: true
+        type: string
+      alias:
+        description: "Key alias"
+        required: true
+        default: "hikari"
+        type: string
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Generate PKCS12 keystore
+        run: |
+          keytool -genkeypair -v \
+            -keystore hikari-keystore.p12 \
+            -storetype PKCS12 \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -alias "${{ github.event.inputs.alias }}" \
+            -storepass "${{ github.event.inputs.password }}" \
+            -keypass "${{ github.event.inputs.password }}" \
+            -dname "CN=Hikari"
+          base64 -w 0 hikari-keystore.p12 > SIGNING_KEY.txt
+
+      - name: Upload Base64 key
+        uses: actions/upload-artifact@v4
+        with:
+          name: signing-key-base64
+          path: SIGNING_KEY.txt
+          retention-days: 1
