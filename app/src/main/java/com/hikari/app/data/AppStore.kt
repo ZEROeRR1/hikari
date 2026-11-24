@@ -105,6 +105,8 @@ class AppStore(private val ctx: Context) {
     val PLAYER_ENHANCE_CUSTOMS = stringPreferencesKey("playerEnhanceCustoms")
         val UI_SCALE_ENABLED = booleanPreferencesKey("uiScaleEnabled")
         val UI_SCALE_PERCENT = intPreferencesKey("uiScalePercent")
+        /** Home Discovery rows (Top 10, trending, anime picks, in cinemas…). */
+        val DISCOVERY_ROWS = booleanPreferencesKey("discoveryRows")
         val HISTORY = stringPreferencesKey("history")
         val HISTORY_PAUSED = booleanPreferencesKey("historyPaused")
         val HIDE_CONTINUE = booleanPreferencesKey("hideContinue")
@@ -579,6 +581,7 @@ class AppStore(private val ctx: Context) {
         val TV_SEEDED = booleanPreferencesKey("tvSeeded")
         /** One-time migration for the new player UI defaults. User choices are preserved. */
         val PLAYER_UI_DEFAULTS_SEEDED = booleanPreferencesKey("playerUiDefaultsSeeded")
+        val PLAYER_HIKARI_DEFAULTS_SEEDED = booleanPreferencesKey("playerHikariDefaultsSeeded")
         val TV_POSTER_SCALE = intPreferencesKey("tvPosterScale")
         val TV_DETAIL_BIG = booleanPreferencesKey("tvDetailBig")
         val TV_DETAIL_BIG_CHOSEN = booleanPreferencesKey("tvDetailBigChosen")
@@ -619,6 +622,7 @@ class AppStore(private val ctx: Context) {
             K.PLAYER_ENHANCE_UNSUPPORTED.name,
             K.TV_SEEDED.name,
             K.PLAYER_UI_DEFAULTS_SEEDED.name,
+            K.PLAYER_HIKARI_DEFAULTS_SEEDED.name,
             K.TV_POSTER_SCALE.name,
             K.TV_TEXT_SCALE.name,
             K.TV_DETAIL_BIG.name,
@@ -1080,7 +1084,7 @@ class AppStore(private val ctx: Context) {
     const val DEFAULT_LOADING_LOGO_SIZE = 100
 
         /** The player's default shell. TV Player is the new default for both layouts. */
-        const val DEFAULT_PLAYER_SKIN = com.hikari.app.player.PlayerSkins.TV
+        const val DEFAULT_PLAYER_SKIN = com.hikari.app.player.PlayerSkins.TESTING
 
         /** The look of the "finding your server" card ([LoadingStyles]). Poster
          *  card: the title's own poster on a glass card, so the first thing a
@@ -1897,6 +1901,17 @@ fun searchExceptionOnFlow(): Flow<Boolean> =
 
     suspend fun setPlayerUiDefaultsSeeded(seeded: Boolean) {
         write("PLAYER_UI_DEFAULTS_SEEDED") { it[K.PLAYER_UI_DEFAULTS_SEEDED] = seeded }
+    }
+
+    fun playerHikariDefaultsSeededFlow(): Flow<Boolean> =
+        store.data.map { it[K.PLAYER_HIKARI_DEFAULTS_SEEDED] ?: false }
+            .distinctUntilChanged()
+            .flowOn(Dispatchers.Default)
+
+    suspend fun playerHikariDefaultsSeeded(): Boolean = playerHikariDefaultsSeededFlow().first()
+
+    suspend fun setPlayerHikariDefaultsSeeded(seeded: Boolean) {
+        write("PLAYER_HIKARI_DEFAULTS_SEEDED") { it[K.PLAYER_HIKARI_DEFAULTS_SEEDED] = seeded }
     }
 
     suspend fun setTvSeeded(seeded: Boolean) {
@@ -3373,6 +3388,15 @@ fun searchExceptionOnFlow(): Flow<Boolean> =
     }
 
     // ---- In-app UI scale ----
+
+    /** Home Discovery rows (Top 10, trending, anime picks, in cinemas and
+     *  more, matched to the picked extension). ON by default. */
+    fun discoveryRowsFlow(): Flow<Boolean> =
+        store.data.map { it[K.DISCOVERY_ROWS] ?: true }.distinctUntilChanged().flowOn(Dispatchers.Default)
+
+    suspend fun setDiscoveryRows(enabled: Boolean) {
+        write("DISCOVERY_ROWS") { it[K.DISCOVERY_ROWS] = enabled }
+    }
 
     /** When ON the app ignores the phone's Font size AND Display size settings
      *  and scales its interface with [uiScaleFlow] instead — so it looks the

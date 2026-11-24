@@ -1035,6 +1035,7 @@ fun SettingsScreen(nav: NavHostController) {
                     item { SettingsCard { Cs3RecommendationsCard(app) } }
                     item { SettingsCard { PlayerStyleCard(onOpen = { showPlayerStyle = true }) } }
                     item { SettingsCard { PlayerGesturesCard(onOpen = { showPlayerGestures = true }) } }
+                    item { SettingsCard { DiscoveryRowsCard(app) } }
                 }
                 SettingsFolder.CATALOG -> {
                     item {
@@ -1800,6 +1801,45 @@ private fun HideHelpCard(app: HikariApp) {
                 // See [Modifier.tvToggle].
                 modifier = Modifier.tvToggle(!hidden) { on ->
                     scope.launch { runCatching { app.store.setHideHelp(!on) } }
+                },
+            )
+        }
+    }
+}
+
+@Composable
+private fun DiscoveryRowsCard(app: HikariApp) {
+    val scope = rememberCoroutineScope()
+    val flow = remember { app.store.discoveryRowsFlow() }
+    val on by flow.collectAsState(initial = true)
+    Column(Modifier.padding(16.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text(
+                    tr("Discovery rows"),
+                    style = MaterialTheme.typography.titleSmall,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+                Spacer(Modifier.height(4.dp))
+                if (!LocalHideHelp.current) {
+                Text(
+                    tr(
+                        "Top 10, trending, anime picks, in cinemas and more on " +
+                            "Home, matched to the picked extension. Off hides them all."
+                    ),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                }
+            }
+            Spacer(Modifier.width(12.dp))
+            Switch(
+                checked = on,
+                onCheckedChange = { v ->
+                    scope.launch { runCatching { app.store.setDiscoveryRows(v) } }
+                },
+                modifier = Modifier.tvToggle(on) { v ->
+                    scope.launch { runCatching { app.store.setDiscoveryRows(v) } }
                 },
             )
         }

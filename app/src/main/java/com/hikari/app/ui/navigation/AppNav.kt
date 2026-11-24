@@ -857,7 +857,7 @@ data class BottomTab(
 
 val BottomTabs = listOf(
     BottomTab(Routes.HOME, "Home", Icons.Filled.Home),
-    BottomTab(Routes.ANIME_CALENDAR, "Anime", Icons.Filled.CalendarMonth),
+    BottomTab(Routes.ANIME_CALENDAR, "Upcoming", Icons.Filled.CalendarMonth),
     BottomTab(Routes.SEARCH, "Search", Icons.Filled.Search),
     BottomTab(Routes.LIBRARY, "My Stuff", Icons.Filled.VideoLibrary),
     BottomTab(Routes.MANGA, "Manga", Icons.Filled.AutoStories),

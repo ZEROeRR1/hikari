@@ -26,6 +26,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -45,6 +46,7 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
@@ -612,6 +614,11 @@ fun HomeScreen(nav: NavHostController) {
     // A genre tap made while extensions are picked: WHERE should it look —
     // those extensions alone, or everything (see the genre strip call site).
     var genreScope by remember { mutableStateOf<GenreScopePick?>(null) }
+    // A streaming-service tap made while extensions are picked: the same
+    // scope question as a genre tap (this extension's Netflix titles, or
+    // everything Netflix has).
+    var companyScope by remember { mutableStateOf<CompanyScopePick?>(null) }
+    var companyOverlay by remember { mutableStateOf<CompanyScopePick?>(null) }
     // The genre an in-place overlay is narrowed to ("" = no narrowing).
     var overlayGenre by rememberSaveable { mutableStateOf("") }
     val scope = rememberCoroutineScope()
@@ -775,6 +782,44 @@ fun HomeScreen(nav: NavHostController) {
             )
         )
     }
+    // One company tap (Home's streaming row): the TMDB film+series grid for
+    // that studio/streamer, same discover path as a genre grid.
+    val openTmdbCompany: (String, Int) -> Unit = { name, companyId ->
+        Routes.safeNavigate(
+            nav,
+            Routes.tmdbGridSpec(
+                TmdbSpec(
+                    type = TmdbSourceType.DISCOVER,
+                    media = "all",
+                    companies = companyId.toString(),
+                    sort = "popularity.desc",
+                    title = name,
+                ).encode(),
+                name,
+                name,
+            )
+        )
+    }
+    // One provider tap (Home's streaming row): everything streaming on that
+    // service, via TMDB watch providers — the correct catalogue for
+    // Netflix/Disney+/Apple TV+/Prime/Hulu/Paramount+/Peacock/Crunchyroll
+    // (companies only cover productions, providers cover the catalogue).
+    val openTmdbProvider: (String, Int) -> Unit = { name, providerId ->
+        Routes.safeNavigate(
+            nav,
+            Routes.tmdbGridSpec(
+                TmdbSpec(
+                    type = TmdbSourceType.DISCOVER,
+                    media = "all",
+                    providers = providerId.toString(),
+                    sort = "popularity.desc",
+                    title = name,
+                ).encode(),
+                name,
+                name,
+            )
+        )
+    }
     // One genre tap, wherever it comes from (the home strip, the Genres
     // screen): with extensions picked it asks WHERE (this extension or
     // everything), otherwise it opens the TMDB genre grid straight away.
@@ -786,7 +831,22 @@ fun HomeScreen(nav: NavHostController) {
             genreScope = GenreScopePick(name, genresText, keywordsText, ext)
         }
     }
+    // One streaming-service tap, from the Home row: with extensions picked
+    // it asks WHERE (this extension's titles or everything), otherwise it
+    // opens the TMDB provider grid straight away (company grid for HBO).
+    // providerId is bundled and instant; companyId resolves in the
+    // background for the "Only here" overlay match.
+    val onPickCompany: (String, Int, Int) -> Unit = { name, companyId, providerId ->
+        val ext = selection.filter { !it.startsWith(COLLECTION_PREFIX) }.toSet()
+        if (ext.isEmpty()) {
+            if (providerId > 0) openTmdbProvider(name, providerId)
+            else openTmdbCompany(name, companyId)
+        } else {
+            companyScope = CompanyScopePick(name, companyId, ext, providerId)
+        }
+    }
     var showGenres by rememberSaveable { mutableStateOf(false) }
+    var showAllExplore by rememberSaveable { mutableStateOf(false) }
     val openVerify: () -> Unit = {        scope.launch {
             val own = withContext(Dispatchers.IO) {
                 providers.firstOrNull { it.config.id == selected }?.let { webUrlChainAsync(it) }
@@ -836,10 +896,33 @@ fun HomeScreen(nav: NavHostController) {
     // Television: the genre strip moves to the END of the feed (the Nuvio-style
     // Home starts straight on the first shelf), so it is one more key here.
     val tvHome = TvMode.current()
-    val feedKeys = remember(uniqueRows, continueEntries, collectionFolderRows, loading, hideContinue, rows.isEmpty(), tvHome) {
+    val discoveryOn by remember { app.store.discoveryRowsFlow() }.collectAsState(initial = true)
+    // The catalogue flavour follows the picked extension: donghua houses
+    // show donghua rows, anime houses anime rows, everything else the
+    // normal movie/series rows. Unknown extensions fall back to normal.
+    val flavour = remember(selection, providers) {
+        val names = (
+            providers.filter { it.config.id in selection }.map { it.config.name + " " + it.config.id } +
+                selection
+            ).joinToString(" ").lowercase()
+        when {
+            names.contains("donghua") -> HomeFlavour.DONGHUA
+            names.contains("anime") || names.contains("aniyomi") || names.contains("anymex") -> HomeFlavour.ANIME
+            else -> HomeFlavour.DEFAULT
+        }
+    }
+    val feedKeys = remember(uniqueRows, continueEntries, collectionFolderRows, loading, hideContinue, rows.isEmpty(), tvHome, selected, selection, discoveryOn) {
         buildList {
             add("home-header")
             if (!hideContinue && continueEntries.isNotEmpty()) add("continue-watching")
+            // Reference-style discovery rows (streaming services + explore
+            // genres): right below Continue Watching, in every phone state —
+            // picks narrow through the same scope question genres use.
+            if (!tvHome) {
+                add("home-streaming")
+                if (discoveryOn) add("home-discovery")
+                add("home-explore")
+            }
             collectionFolderRows.forEach { c -> add("collection-folders|${c.id}") }
             if (loading && collectionFolderRows.isEmpty()) repeat(4) { i -> add("home-shimmer|$i") }
             uniqueRows.forEach { row -> add(row.key.ifBlank { "${row.providerName}|${row.title}" }) }
@@ -876,6 +959,68 @@ fun HomeScreen(nav: NavHostController) {
             // (see the GlassDialog after the Box) says what happened and points
             // at Settings → Logs, then stays out of the way.
             item {
+                // Immersive 2 owns the top of the screen: the art bleeds to
+                // the top edge with the header floating over it (reference
+                // style). Every other banner keeps the header above the art.
+                val immersive2Full = !tvHome &&
+                    heroConfig.style == com.hikari.app.ui.components.HeroStyles.IMMERSIVE2 &&
+                    featured.isNotEmpty()
+                if (immersive2Full) {
+                    Box(Modifier.fillMaxWidth()) {
+                        HeroBanner(
+                            items = featured,
+                            onClick = { item ->
+                                Routes.safeNavigate(
+                                    nav,
+                                    Routes.detail(
+                                        item.providerId, item.type, item.id,
+                                        item.title, item.posterUrl, item.rawType
+                                    )
+                                )
+                            },
+                            // Immersive 2's Play pill: same autoplay route
+                            // the shelf hold-menu uses.
+                            onPlay = { item ->
+                                Routes.safeNavigate(
+                                    nav,
+                                    if (item.rawType == "manga") {
+                                        Routes.mangaRoute(item.providerId, item.id, item.title, item.posterUrl)
+                                    } else {
+                                        Routes.detail(
+                                            item.providerId, item.type, item.id,
+                                            item.title, item.posterUrl, item.rawType, autoplay = true
+                                        )
+                                    }
+                                )
+                            },
+                            isFavorite = { item -> item.uniqueId in favoriteIds },
+                            onToggleFavorite = { item ->
+                                scope.launch {
+                                    runCatching {
+                                        if (item.uniqueId in favoriteIds) {
+                                            app.store.removeFavorite(item.uniqueId)
+                                        } else {
+                                            app.store.addFavorite(item)
+                                        }
+                                    }
+                                }
+                            },
+                            config = heroConfig,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                        HomeHeader(
+                            selected = headerSelection,
+                            onSearch = openSearch,
+                            onTranslate = { showTranslate = true },
+                            onVerify = openVerify,
+                            overlay = true,
+                            onSettings = openSettings,
+                            onMouse = { com.hikari.app.tv.MouseMode.toggle() },
+                            mouseOn = com.hikari.app.tv.MouseMode.enabled,
+                            modifier = Modifier.statusBarsPadding(),
+                        )
+                    }
+                } else {
                 Column(Modifier.fillMaxWidth()) {
                     if (!tvHome) {
                         HomeHeader(
@@ -932,13 +1077,38 @@ fun HomeScreen(nav: NavHostController) {
                                         )
                                     )
                                 },
+                                // Immersive 2's Play pill: same autoplay route
+                                // the shelf hold-menu uses.
+                                onPlay = { item ->
+                                    Routes.safeNavigate(
+                                        nav,
+                                        if (item.rawType == "manga") {
+                                            Routes.mangaRoute(item.providerId, item.id, item.title, item.posterUrl)
+                                        } else {
+                                            Routes.detail(
+                                                item.providerId, item.type, item.id,
+                                                item.title, item.posterUrl, item.rawType, autoplay = true
+                                            )
+                                        }
+                                    )
+                                },
+                                isFavorite = { item -> item.uniqueId in favoriteIds },
+                                onToggleFavorite = { item ->
+                                    scope.launch {
+                                        runCatching {
+                                            if (item.uniqueId in favoriteIds) {
+                                                app.store.removeFavorite(item.uniqueId)
+                                            } else {
+                                                app.store.addFavorite(item)
+                                            }
+                                        }
+                                    }
+                                },
                                 config = heroConfig,
                             )
                         }
                     }
-                    if (!tvHome) {
-                        HomeGenresButton(onClick = { showGenres = true })
-                    }
+                }
                 }
             }
             if (!hideContinue && continueEntries.isNotEmpty()) {
@@ -978,6 +1148,54 @@ fun HomeScreen(nav: NavHostController) {
                             }
                         } else null,
                     )
+                }
+            }
+            // Reference-style discovery rows: streaming logos + genre tiles.
+            // A pick narrows through the same scope question genres use.
+            if (!tvHome) {
+                item(key = "home-streaming") {
+                    HomeStreamingRow(onPickCompany = onPickCompany)
+                }
+                if (discoveryOn) {
+                    item(key = "home-discovery") {
+                        HomeDiscoveryBlock(
+                            flavour = flavour,
+                            featured = featured,
+                            continueEntries = continueEntries,
+                            extItems = uniqueRows.flatMap { it.items },
+                            onOpen = { item ->
+                                Routes.safeNavigate(
+                                    nav,
+                                    Routes.detail(
+                                        item.providerId, item.type, item.id,
+                                        item.title, item.posterUrl, item.rawType
+                                    )
+                                )
+                            },
+                            onGrid = { name, media, genresText, lang, sort, votesMin, dateFrom ->
+                                Routes.safeNavigate(
+                                    nav,
+                                    Routes.tmdbGridSpec(
+                                        TmdbSpec(
+                                            type = TmdbSourceType.DISCOVER,
+                                            media = media,
+                                            genresText = genresText,
+                                            language = lang,
+                                            sort = sort,
+                                            votesMin = votesMin,
+                                            dateFrom = dateFrom,
+                                            title = name,
+                                        ).encode(),
+                                        name,
+                                        name,
+                                    )
+                                )
+                            },
+                        )
+                    }
+                }
+                item(key = "home-explore") {
+                    HomeExploreGenresRow(onPick = onGenrePick, onMore = { showAllExplore = true })
                 }
             }
             collectionFolderRows.forEach { c ->
@@ -1435,6 +1653,79 @@ fun HomeScreen(nav: NavHostController) {
         )
     }
 
+    // A streaming-service tap made while extensions are picked: this
+    // extension's titles from that studio, or everything the studio has.
+    // "Only here" matches the picked extensions' loaded shelves against the
+    // studio's TMDB catalogue progressively (extension items carry no studio
+    // data, so this is a match, not a full studio list); "Everything" is the
+    // TMDB company grid, which pages without end.
+    companyScope?.let { pick ->
+        val scopeName = if (pick.extensionIds.size == 1) {
+            providers.firstOrNull { it.config.id == pick.extensionIds.first() }
+                ?.config?.name ?: selectedName ?: tr("this extension")
+        } else {
+            selectedName ?: I18n.t("%s sources").replace("%s", pick.extensionIds.size.toString())
+        }
+        AlertDialog(
+            onDismissRequest = { companyScope = null },
+            title = { Text(pick.name) },
+            text = {
+                Text(
+                    tr("Only this extension's titles, or everything out there?") + " " +
+                        I18n.t("Studio: %s.").replace("%s", pick.name)
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    if (pick.companyId > 0) {
+                        companyOverlay = pick
+                        companyScope = null
+                    } else {
+                        Toast.makeText(
+                            context,
+                            I18n.t("Still matching this studio — try again in a second"),
+                            Toast.LENGTH_SHORT
+                        ).show()
+                    }
+                }) { Text(I18n.t("Only %s").replace("%s", scopeName)) }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    companyScope = null
+                    if (pick.providerId > 0) openTmdbProvider(pick.name, pick.providerId)
+                    else openTmdbCompany(pick.name, pick.companyId)
+                }) { Text(tr("Everything")) }
+            },
+        )
+    }
+
+    // Extension-scoped studio view (see CompanyExtensionOverlay).
+    companyOverlay?.let { pick ->
+        val scopeName = if (pick.extensionIds.size == 1) {
+            providers.firstOrNull { it.config.id == pick.extensionIds.first() }
+                ?.config?.name ?: selectedName ?: tr("this extension")
+        } else {
+            selectedName ?: I18n.t("%s sources").replace("%s", pick.extensionIds.size.toString())
+        }
+        CompanyExtensionOverlay(
+            companyName = pick.name,
+            companyId = pick.companyId,
+            extName = scopeName,
+            rows = uniqueRows.filter { it.providerId in pick.extensionIds },
+            onOpenItem = { item ->
+                Routes.safeNavigate(
+                    nav,
+                    if (item.rawType == "manga") {
+                        Routes.mangaRoute(item.providerId, item.id, item.title, item.posterUrl)
+                    } else {
+                        Routes.detail(item.providerId, item.type, item.id, item.title, item.posterUrl, item.rawType)
+                    }
+                )
+            },
+            onClose = { companyOverlay = null },
+        )
+    }
+
     // Full-screen genre browser (see GenresOverlay): image cards for every
     // genre, with its own search. A genre tap closes the browser first so the
     // scope dialog (extensions picked) or the TMDB grid lands on top.
@@ -1443,6 +1734,19 @@ fun HomeScreen(nav: NavHostController) {
             onClose = { showGenres = false },
             onPick = { name, genresText, keywordsText ->
                 showGenres = false
+                onGenrePick(name, genresText, keywordsText)
+            },
+        )
+    }
+
+    // Full genre list in the Explore card UI (see HomeAllGenresOverlay): a
+    // true overlay above the feed, not a feed item — a lazy grid inside a
+    // lazy list would measure unbounded and the page needs its own scroll.
+    if (showAllExplore && !tvHome) {
+        HomeAllGenresOverlay(
+            onClose = { showAllExplore = false },
+            onPick = { name, genresText, keywordsText ->
+                showAllExplore = false
                 onGenrePick(name, genresText, keywordsText)
             },
         )
@@ -2927,6 +3231,150 @@ private data class GenreScopePick(
     val extensionIds: Set<String>,
 )
 
+/** A streaming-service tap held for the same scope question: which company
+ *  was tapped, and which extensions Home had picked. */
+private data class CompanyScopePick(
+    val name: String,
+    val companyId: Int,
+    val extensionIds: Set<String>,
+    /** Bundled TMDB watch-provider id (0 = HBO, which uses the company). */
+    val providerId: Int = 0,
+)
+
+/** How a title is keyed when matching an extension's shelves against a
+ *  studio catalogue: letters and digits only, so punctuation and case
+ *  differences don't hide a match. */
+private fun companyMatchKey(title: String, year: Int?): String {
+    val t = title.trim().lowercase().replace(Regex("[^a-z0-9 ]+"), " ").replace(Regex("\\s+"), " ").trim()
+    return t + "|" + (year?.toString() ?: "")
+}
+
+/** "Only this extension" studio view: the picked extensions' loaded shelves
+ *  matched against the studio's TMDB catalogue, streaming in as company
+ *  pages land. Extension items carry no studio data, so this matches titles
+ *  (exact first, then title-only when a side has no year) — a fast,
+ *  progressive answer, not a full studio list (that is "Everything"). */
+@Composable
+private fun CompanyExtensionOverlay(
+    companyName: String,
+    companyId: Int,
+    extName: String,
+    rows: List<CatalogRow>,
+    onOpenItem: (MediaItem) -> Unit,
+    onClose: () -> Unit,
+) {
+    BackHandler(onBack = onClose)
+    var matched by remember(companyId, rows) { mutableStateOf<List<MediaItem>>(emptyList()) }
+    var pagesDone by remember(companyId, rows) { mutableStateOf(0) }
+    var stillMatching by remember(companyId, rows) { mutableStateOf(true) }
+    LaunchedEffect(companyId, rows) {
+        val pool = rows.flatMap { it.items }.distinctBy { it.uniqueId }
+        val byKey = HashMap<String, MediaItem>()
+        val byTitle = HashMap<String, MediaItem>()
+        for (item in pool) {
+            byKey.putIfAbsent(companyMatchKey(item.searchTitle, item.year), item)
+            byTitle.putIfAbsent(companyMatchKey(item.searchTitle, null), item)
+            if (item.originalTitle.isNotBlank()) {
+                byKey.putIfAbsent(companyMatchKey(item.originalTitle, item.year), item)
+                byTitle.putIfAbsent(companyMatchKey(item.originalTitle, null), item)
+            }
+        }
+        val found = LinkedHashMap<String, MediaItem>()
+        var page = 1
+        var more = true
+        // Bounded: a giant studio would page for minutes; 60 pages (≈2400
+        // titles) match everything an extension's shelves can hold.
+        while (more && page <= 60) {
+            val res = SearchDiscovery.browsePages(
+                "", companyId, movie = true, tv = true, 0.0, 0, "", listOf(page),
+            )
+            more = res.maybeMore
+            for (m in res.items) {
+                val hit = byKey[companyMatchKey(m.searchTitle, m.year)]
+                    ?: byTitle[companyMatchKey(m.searchTitle, null)]
+                    ?: (if (m.originalTitle.isNotBlank()) {
+                        byKey[companyMatchKey(m.originalTitle, m.year)]
+                            ?: byTitle[companyMatchKey(m.originalTitle, null)]
+                    } else null)
+                if (hit != null) found.putIfAbsent(hit.uniqueId, hit)
+            }
+            matched = found.values.sortedByDescending { it.rating ?: -1.0 }
+            pagesDone = page
+            page++
+        }
+        stillMatching = false
+    }
+    Column(
+        Modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.surface.copy(alpha = 1f)),
+    ) {
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .padding(start = 4.dp, end = 8.dp, top = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            IconButton(onClick = onClose) {
+                Icon(
+                    Icons.AutoMirrored.Filled.ArrowBack,
+                    contentDescription = tr("Back"),
+                    tint = MaterialTheme.colorScheme.onSurface,
+                )
+            }
+            Column(Modifier.weight(1f)) {
+                Text(
+                    companyName + " · " + extName,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    if (stillMatching) {
+                        I18n.t("Matching… %s on %s").replaceFirst("%s", matched.size.toString()).replaceFirst("%s", extName)
+                    } else {
+                        I18n.t("%s titles on %s").replaceFirst("%s", matched.size.toString()).replaceFirst("%s", extName)
+                    },
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            if (stillMatching) {
+                CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp)
+            }
+        }
+        if (!stillMatching && matched.isEmpty()) {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Text(
+                    tr("No %s titles on %s's loaded shelves").replaceFirst("%s", companyName).replaceFirst("%s", extName),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 24.dp),
+                )
+            }
+        } else {
+            LazyVerticalGrid(
+                columns = GridCells.Fixed(3),
+                state = rememberLazyGridState(),
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(
+                    start = 10.dp, end = 10.dp, top = 8.dp,
+                    bottom = LocalTaskbarInset.current + 12.dp,
+                ),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                items(matched, key = { it.uniqueId }) { item ->
+                    HomeResultCard(item = item, onClick = { onOpenItem(item) })
+                }
+            }
+        }
+    }
+}
+
 private class BrowseCursor(
     val providerId: String,
     val ref: CatalogRef,
@@ -3621,6 +4069,738 @@ private fun HomeResultCard(
     }
 }
 
+
+/** Section title with the reference app's red accent bar, plus an optional
+ *  red Show All action on the right. */
+@Composable
+private fun HomeSectionHeader(title: String, onShowAll: (() -> Unit)? = null) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .padding(start = 16.dp, end = 16.dp, top = 18.dp, bottom = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            Modifier
+                .width(4.dp)
+                .height(18.dp)
+                .clip(RoundedCornerShape(2.dp))
+                .background(MaterialTheme.colorScheme.primary),
+        )
+        Spacer(Modifier.width(8.dp))
+        Text(
+            tr(title),
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.Bold,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f),
+        )
+        if (onShowAll != null) {
+            Text(
+                tr("Show All"),
+                style = MaterialTheme.typography.labelLarge,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.clickable(onClick = onShowAll),
+            )
+        }
+    }
+}
+
+/** Reference-style streaming row: REAL bundled brand logos, instant on the
+ *  first frame, zero network. Taps arm instantly (provider ids are bundled);
+ *  the company id for the "Only here" overlay still resolves in the
+ *  background. */
+@Composable
+private fun HomeStreamingRow(onPickCompany: (String, Int, Int) -> Unit) {
+    val names = remember { StreamingBrands.ORDER }
+    // Company ids only (for the "Only here" overlay match) — paint never
+    // waits for these. Parallel, not sequential.
+    var companies by remember { mutableStateOf<Map<String, SearchDiscovery.ResolvedCompany?>>(emptyMap()) }
+    LaunchedEffect(Unit) {
+        val pairs = coroutineScope {
+            names.map { n -> async(Dispatchers.IO) { n to SearchDiscovery.resolveCompany(n) } }.awaitAll()
+        }
+        val m = LinkedHashMap<String, SearchDiscovery.ResolvedCompany?>()
+        for ((n, hit) in pairs) m[n] = hit
+        companies = m
+    }
+    Column(Modifier.fillMaxWidth()) {
+        HomeSectionHeader("Streaming services")
+        LazyRow(
+            contentPadding = PaddingValues(horizontal = 16.dp),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            items(names, key = { it }) { name ->
+                val brand = StreamingBrands.of(name)
+                val hit = companies[name]
+                Column(
+                    Modifier.width(110.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    Surface(
+                        onClick = {
+                            val companyId = hit?.id ?: -1
+                            onPickCompany(
+                                if (hit != null && hit.name.isNotBlank()) hit.name else name,
+                                companyId,
+                                brand.providerId,
+                            )
+                        },
+                        shape = RoundedCornerShape(12.dp),
+                        // Light plate like the detail screen's company tiles:
+                        // TMDB/bundled wordmarks are drawn for light plates
+                        // (HBO's black logo is invisible on the old dark tile).
+                        color = androidx.compose.ui.graphics.Color(0xFFF2F3F7),
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.25f)),
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Box(
+                            Modifier
+                                .fillMaxWidth()
+                                .height(54.dp),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            val tmdbLogo = hit?.logoUrl
+                            // Bundled wide wordmarks first: they are cropped to
+                            // fill the landscape tile (Disney/Apple/Prime/
+                            // Peacock). The live TMDB company logo is square
+                            // and would shrink back to a centered stamp.
+                            if (brand.resId != 0) {
+                                androidx.compose.foundation.Image(
+                                    painter = androidx.compose.ui.res.painterResource(brand.resId),
+                                    contentDescription = name,
+                                    modifier = Modifier
+                                        .fillMaxWidth(0.92f)
+                                        .height(36.dp),
+                                    contentScale = ContentScale.Fit,
+                                )
+                            } else if (tmdbLogo != null) {
+                                coil.compose.AsyncImage(
+                                    model = tmdbLogo,
+                                    contentDescription = name,
+                                    modifier = Modifier
+                                        .fillMaxWidth(0.92f)
+                                        .height(36.dp),
+                                    contentScale = ContentScale.Fit,
+                                )
+                            } else {
+                                Text(
+                                    brand.label,
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    fontSize = 15.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                        }
+                    }
+                    Text(
+                        name,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        fontSize = 11.sp,
+                        modifier = Modifier.padding(top = 4.dp),
+                    )
+                }
+            }
+        }
+    }
+}
+
+/** Reference-style genre tiles: fanned posters over a tinted tile, tapping
+ *  opens the genre the same way the Genres browser does. The last cell is a
+ *  More tile opening the FULL genre list in this same card UI. */
+@Composable
+private fun HomeExploreGenresRow(
+    onPick: (String, String, String) -> Unit,
+    onMore: () -> Unit,
+) {
+    var art by remember { mutableStateOf<Map<String, List<MediaItem>>>(emptyMap()) }
+    LaunchedEffect(Unit) {
+        val m = LinkedHashMap<String, List<MediaItem>>()
+        for (g in SearchDiscovery.EXPLORE_GENRES) m[g] = SearchDiscovery.genreArt(g)
+        art = m
+    }
+    Column(Modifier.fillMaxWidth()) {
+        HomeSectionHeader("Explore genres")
+        Column(Modifier.padding(horizontal = 16.dp)) {
+        for (row in SearchDiscovery.EXPLORE_GENRES.chunked(2)) {
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                for (g in row) {
+                    val ids = remember(g) { com.hikari.app.data.Genres.tmdbGenreFilter(g) }
+                    val kw = remember(g, ids) {
+                        if (ids.isNotEmpty()) ""
+                        else com.hikari.app.data.Genres.keywordCandidates(g).joinToString("|")
+                    }
+                    HomeExploreGenreTile(
+                        genre = g,
+                        art = art[g],
+                        onExplore = { onPick(g, ids, kw) },
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+                repeat(2 - row.size) { Spacer(Modifier.weight(1f)) }
+            }
+            Spacer(Modifier.height(10.dp))
+        }
+        // More tile: same card shape with a real thumbnail collage, opens
+        // every genre in this same UI.
+        val moreArt = remember(art) { art.values.firstOrNull { it.isNotEmpty() } }
+        HomeExploreMoreTile(art = moreArt, onMore = onMore)
+        }
+    }
+}
+
+/** The More cell closing the Explore section: same 16:10 collage card as the
+ *  genre tiles (never a plain box), opening the full genre list rendered
+ *  with the same tiles. */
+@Composable
+private fun HomeExploreMoreTile(art: List<MediaItem>?, onMore: () -> Unit) {
+    Column(Modifier.fillMaxWidth().clickable { onMore() }) {
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .aspectRatio(16f / 5f)
+                .clip(RoundedCornerShape(12.dp))
+                .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)),
+        ) {
+            val posters = art.orEmpty().take(3)
+            if (posters.isNotEmpty()) {
+                Row(Modifier.fillMaxSize()) {
+                    for ((i, p) in posters.withIndex()) {
+                        Box(
+                            Modifier
+                                .weight(1f)
+                                .fillMaxSize()
+                                .padding(
+                                    start = if (i == 0) 0.dp else 3.dp,
+                                    top = (i * 7).dp,
+                                    bottom = ((posters.size - 1 - i) * 7).dp,
+                                )
+                                .clip(RoundedCornerShape(8.dp)),
+                        ) {
+                            coil.compose.AsyncImage(
+                                model = p.backdropUrl ?: p.posterUrl,
+                                contentDescription = p.title,
+                                modifier = Modifier.fillMaxSize(),
+                                contentScale = ContentScale.Crop,
+                            )
+                        }
+                    }
+                }
+            }
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .background(
+                        Brush.verticalGradient(
+                            0.25f to androidx.compose.ui.graphics.Color.Black.copy(alpha = 0.45f),
+                            1f to androidx.compose.ui.graphics.Color.Black.copy(alpha = 0.65f),
+                        ),
+                    ),
+            )
+            Text(
+                tr("More genres"),
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold,
+                color = androidx.compose.ui.graphics.Color.White,
+                modifier = Modifier.align(Alignment.Center),
+            )
+        }
+    }
+}
+
+/** Full genre list in the Explore card UI: search on top, every genre as a
+ *  collage tile (art loads lazily per visible tile). A tap reports through
+ *  onPick like any other genre tap. */
+@Composable
+private fun HomeAllGenresOverlay(
+    onClose: () -> Unit,
+    onPick: (String, String, String) -> Unit,
+) {
+    BackHandler(onBack = onClose)
+    val all = remember {
+        com.hikari.app.data.Genres.ALL.map { name ->
+            val ids = com.hikari.app.data.Genres.tmdbGenreFilter(name)
+            HomeGenre(
+                name = name,
+                genresText = ids,
+                keywordsText = if (ids.isNotEmpty()) ""
+                else com.hikari.app.data.Genres.keywordCandidates(name).joinToString("|"),
+            )
+        }
+    }
+    var query by remember { mutableStateOf("") }
+    val shown = remember(all, query) {
+        val q = query.trim().lowercase()
+        if (q.isEmpty()) all
+        else all.filter { it.name.lowercase().contains(q) }
+    }
+    Column(
+        Modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.surface.copy(alpha = 1f)),
+    ) {
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .padding(start = 4.dp, end = 16.dp, top = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            IconButton(onClick = onClose) {
+                Icon(
+                    Icons.AutoMirrored.Filled.ArrowBack,
+                    contentDescription = tr("Back"),
+                )
+            }
+            Text(
+                tr("Explore genres"),
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.Bold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+        }
+        GlassSearchField(
+            value = query,
+            onValueChange = { query = it },
+            placeholder = tr("Search genres"),
+            height = 46.dp,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 8.dp),
+        )
+        LazyVerticalGrid(
+            columns = GridCells.Fixed(2),
+            state = rememberLazyGridState(),
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(
+                start = 16.dp, end = 16.dp, top = 4.dp, bottom = 24.dp
+            ),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            items(shown.size, key = { shown[it].name }) { i ->
+                val g = shown[i]
+                var art by remember(g.name) { mutableStateOf<List<MediaItem>?>(null) }
+                LaunchedEffect(g.name) {
+                    if (art == null) art = SearchDiscovery.genreArt(g.name)
+                }
+                HomeExploreGenreTile(
+                    genre = g.name,
+                    art = art,
+                    onExplore = { onPick(g.name, g.genresText, g.keywordsText) },
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun HomeExploreGenreTile(
+    genre: String,
+    /** Null while loading (spinner); empty when loaded-but-bare (monogram). */
+    art: List<MediaItem>?,
+    onExplore: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Column(modifier.clickable { onExplore() }) {
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .aspectRatio(16f / 10f)
+                .clip(RoundedCornerShape(12.dp))
+                .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)),
+        ) {
+            val posters = art.orEmpty().take(3)
+            if (art == null) {
+                CircularProgressIndicator(
+                    Modifier
+                        .align(Alignment.Center)
+                        .size(24.dp),
+                    strokeWidth = 2.dp,
+                )
+            } else if (posters.isEmpty()) {
+                Text(
+                    genre.take(1).uppercase(),
+                    style = MaterialTheme.typography.displaySmall,
+                    fontWeight = FontWeight.Black,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+                    modifier = Modifier.align(Alignment.Center),
+                )
+            } else {
+                Row(Modifier.fillMaxSize()) {
+                    for ((i, p) in posters.withIndex()) {
+                        Box(
+                            Modifier
+                                .weight(1f)
+                                .fillMaxSize()
+                                .padding(
+                                    start = if (i == 0) 0.dp else 3.dp,
+                                    top = (i * 7).dp,
+                                    bottom = ((posters.size - 1 - i) * 7).dp,
+                                )
+                                .clip(RoundedCornerShape(8.dp)),
+                        ) {
+                            coil.compose.AsyncImage(
+                                model = p.backdropUrl ?: p.posterUrl,
+                                contentDescription = p.title,
+                                modifier = Modifier.fillMaxSize(),
+                                contentScale = ContentScale.Crop,
+                            )
+                        }
+                    }
+                    if (posters.size < 3) {
+                        repeat(3 - posters.size) { Spacer(Modifier.weight(1f)) }
+                    }
+                }
+            }
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .background(
+                        Brush.verticalGradient(
+                            0.45f to androidx.compose.ui.graphics.Color.Transparent,
+                            1f to androidx.compose.ui.graphics.Color.Black.copy(alpha = 0.55f),
+                        ),
+                    ),
+            )
+            Text(
+                genre,
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.Bold,
+                color = androidx.compose.ui.graphics.Color.White,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    .padding(start = 10.dp, bottom = 8.dp, end = 10.dp),
+            )
+        }
+    }
+}
+
+/** Which catalogue the Discovery rows draw: the picked extension's kind. */
+private enum class HomeFlavour { DEFAULT, ANIME, DONGHUA }
+
+/** Reference-style discovery catalogue: Hot right now, If you like, Top 10,
+ *  Series watching, In cinemas/Airing now, Anime picks, All-time greats and
+ *  Coming soon — TMDB-backed like the rest of Home, shifting flavour with
+ *  the picked extension (donghua/anime/movie-series). Every row carries
+ *  Show All into the matching endless grid. */
+@Composable
+private fun HomeDiscoveryBlock(
+    flavour: HomeFlavour,
+    featured: List<MediaItem>,
+    continueEntries: List<com.hikari.app.data.HistoryEntry>,
+    extItems: List<MediaItem> = emptyList(),
+    onOpen: (MediaItem) -> Unit,
+    onGrid: (name: String, media: String, genresText: String, lang: String, sort: String, votesMin: String, dateFrom: String) -> Unit,
+) {
+    val animLang = when (flavour) {
+        HomeFlavour.DONGHUA -> "zh"
+        HomeFlavour.ANIME -> "ja"
+        HomeFlavour.DEFAULT -> ""
+    }
+    val dateFmt = remember { java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US) }
+    val recentFrom = remember {
+        val c = java.util.Calendar.getInstance()
+        c.add(java.util.Calendar.DAY_OF_YEAR, -60)
+        dateFmt.format(c.time)
+    }
+    val tomorrow = remember {
+        val c = java.util.Calendar.getInstance()
+        c.add(java.util.Calendar.DAY_OF_YEAR, 1)
+        dateFmt.format(c.time)
+    }
+
+    val extIds = remember(extItems) { extItems.map { it.providerId }.toSet() }
+    val extRecent = remember(continueEntries, extIds) { continueEntries.filter { it.providerId in extIds } }
+    val extDistinct = remember(extItems) { extItems.distinctBy { it.providerId.toString() + "|" + it.type.toString() + "|" + it.id } }
+    // Seeds from YOUR recent watches inside this same extension (titles matched
+    // to catalog items for their genres). Empty when you have not watched here.
+    fun extSeedGenres(): Set<String> {
+        val byTitle = extDistinct.groupBy { it.title.trim().lowercase() }
+        val gs = LinkedHashSet<String>()
+        for (h in extRecent.take(6)) {
+            val hit = byTitle[h.title.trim().lowercase()]?.firstOrNull()
+                ?: extDistinct.firstOrNull { it.providerId == h.providerId && it.type == h.type }
+            hit?.genres?.forEach { gs.add(it.lowercase()) }
+        }
+        return gs
+    }
+    // Your-genres-first ordering of the extension catalog — updates as you watch.
+    fun personalizedExt(): List<MediaItem> {
+        val seeds = extSeedGenres()
+        if (seeds.isEmpty()) return extDistinct
+        val yes = ArrayList<MediaItem>()
+        val no = ArrayList<MediaItem>()
+        for (m in extDistinct) {
+            var hit = false
+            for (g in m.genres) { if (g.lowercase() in seeds) { hit = true; break } }
+            if (hit) yes.add(m) else no.add(m)
+        }
+        return yes + no
+    }
+    var hot by remember(flavour) { mutableStateOf<List<MediaItem>?>(null) }
+    LaunchedEffect(flavour, extItems) {
+        hot = if (flavour == HomeFlavour.DEFAULT) SearchDiscovery.trending()
+        else if (extItems.isNotEmpty()) extItems.take(12)
+        else SearchDiscovery.discover(listOf("movie", "tv"), "16", animLang, "popularity.desc")
+    }
+
+    fun com.hikari.app.data.HistoryEntry.toItem() = MediaItem(providerId = providerId, id = mediaId, title = title, type = type, posterUrl = posterUrl)
+    val basis = remember(continueEntries, featured, extRecent, extDistinct, flavour) {
+        if (flavour == HomeFlavour.DEFAULT) {
+            continueEntries.firstOrNull()?.toItem() ?: featured.firstOrNull()
+        } else {
+            // Same-extension basis only: your last watch inside THIS extension,
+            // else its first catalog item. A movie you watched must never title
+            // a donghua/anime row — and with no extension basis the row hides.
+            extRecent.firstOrNull()?.toItem() ?: extDistinct.firstOrNull()
+        }
+    }
+    var like by remember(basis) { mutableStateOf<List<MediaItem>?>(null) }
+    LaunchedEffect(basis, flavour, extDistinct) {
+        if (flavour != HomeFlavour.DEFAULT) {
+            val b = basis
+            like = if (b == null || extDistinct.isEmpty()) emptyList()
+            else {
+                val pool = extDistinct.filterNot { it.providerId == b.providerId && it.id == b.id }
+                val bFull = extDistinct.firstOrNull { it.title.equals(b.title, ignoreCase = true) }
+                val bGenres = bFull?.genres.orEmpty().map { it.lowercase() }.toSet()
+                val matched = if (bGenres.isEmpty()) pool.filter { it.type == b.type }
+                else pool.filter { m -> m.type == b.type && m.genres.any { g -> g.lowercase() in bGenres } }
+                matched.ifEmpty { pool.filter { it.type == b.type } }.ifEmpty { pool }.take(12)
+            }
+        } else if (basis == null) like = emptyList() else like = SearchDiscovery.similarFor(basis)
+    }
+
+    var top10 by remember(flavour) { mutableStateOf<List<MediaItem>?>(null) }
+    LaunchedEffect(flavour, extItems, extRecent) {
+        if (flavour != HomeFlavour.DEFAULT && extDistinct.isNotEmpty()) { top10 = personalizedExt().take(10); return@LaunchedEffect }
+        val g = if (flavour == HomeFlavour.DEFAULT) "" else "16"
+        top10 = SearchDiscovery.discover(listOf("movie", "tv"), g, animLang, "vote_average.desc", 500).take(10)
+    }
+
+    var series by remember(flavour) { mutableStateOf<List<MediaItem>?>(null) }
+    LaunchedEffect(flavour, extDistinct) {
+        if (flavour != HomeFlavour.DEFAULT && extDistinct.isNotEmpty()) {
+            val s = extDistinct.filter { it.type == MediaType.SERIES }.take(12)
+            series = if (s.isNotEmpty()) s else extDistinct.take(12)
+            return@LaunchedEffect
+        }
+        val g = if (flavour == HomeFlavour.DEFAULT) "" else "16"
+        series = SearchDiscovery.discover(listOf("tv"), g, animLang, "popularity.desc")
+    }
+
+    var cinemas by remember(flavour) { mutableStateOf<List<MediaItem>?>(null) }
+    LaunchedEffect(flavour, extItems) {
+        if (flavour != HomeFlavour.DEFAULT) { cinemas = emptyList(); return@LaunchedEffect }
+        cinemas = if (flavour == HomeFlavour.DEFAULT) SearchDiscovery.nowPlaying()
+        else SearchDiscovery.airingNow("16", animLang)
+    }
+
+    var picks by remember(flavour) { mutableStateOf<List<MediaItem>?>(null) }
+    LaunchedEffect(flavour, extItems, extRecent) {
+        if (flavour != HomeFlavour.DEFAULT && extDistinct.isNotEmpty()) {
+            val ordered = personalizedExt()
+            val rot = java.util.Calendar.getInstance().get(java.util.Calendar.DAY_OF_YEAR) % ordered.size
+            picks = (ordered + ordered).drop(rot).take(12)
+            return@LaunchedEffect
+        }
+        val lang = if (flavour == HomeFlavour.DEFAULT) "ja" else animLang
+        picks = SearchDiscovery.discover(listOf("movie", "tv"), "16", lang, "popularity.desc")
+    }
+
+    var greats by remember(flavour) { mutableStateOf<List<MediaItem>?>(null) }
+    LaunchedEffect(flavour, extItems) {
+        if (flavour != HomeFlavour.DEFAULT && extDistinct.isNotEmpty()) { greats = personalizedExt().asReversed().take(12); return@LaunchedEffect }
+        val g = if (flavour == HomeFlavour.DEFAULT) "" else "16"
+        greats = SearchDiscovery.discover(listOf("movie", "tv"), g, animLang, "vote_average.desc", 2000)
+    }
+
+    var soon by remember(flavour) { mutableStateOf<List<MediaItem>?>(null) }
+    LaunchedEffect(flavour, extItems) {
+        if (flavour != HomeFlavour.DEFAULT) { soon = emptyList(); return@LaunchedEffect }
+        soon = if (flavour == HomeFlavour.DEFAULT) SearchDiscovery.comingSoon()
+        else SearchDiscovery.discover(listOf("movie", "tv"), "16", animLang, "popularity.desc")
+    }
+
+    Column(Modifier.fillMaxWidth()) {
+        HomeDiscoveryRow(title = "Hot right now", items = hot, onOpen = onOpen, onShowAll = {
+            onGrid("Hot right now", "all", if (flavour == HomeFlavour.DEFAULT) "" else "16", animLang, "popularity.desc", "", "")
+        })
+        if (basis != null && like?.isNotEmpty() == true) {
+            HomeDiscoveryRow(title = "If you like ${basis.title}", items = like, onOpen = onOpen, onShowAll = {
+                val g = basis.genres.firstOrNull()?.let { com.hikari.app.data.Genres.tmdbGenreFilter(it) }.orEmpty()
+                onGrid("If you like ${basis.title}", "all", g, animLang, "popularity.desc", "", "")
+            })
+        }
+        HomeDiscoveryRow(title = "Today's top 10", items = top10, onOpen = onOpen, ranked = true, onShowAll = {
+            onGrid("Today's top 10", "all", if (flavour == HomeFlavour.DEFAULT) "" else "16", animLang, "vote_average.desc", "500", "")
+        })
+        HomeDiscoveryRow(title = "Series everyone is watching", items = series, onOpen = onOpen, onShowAll = {
+            onGrid("Series everyone is watching", "tv", if (flavour == HomeFlavour.DEFAULT) "" else "16", animLang, "popularity.desc", "", "")
+        })
+        HomeDiscoveryRow(
+            title = if (flavour == HomeFlavour.DEFAULT) "In cinemas now" else "Airing now",
+            items = cinemas, onOpen = onOpen, onShowAll = {
+                if (flavour == HomeFlavour.DEFAULT) onGrid("In cinemas now", "movie", "", "", "popularity.desc", "", recentFrom)
+                else onGrid("Airing now", "tv", "16", animLang, "popularity.desc", "", "")
+            },
+        )
+        HomeDiscoveryRow(
+            title = if (flavour == HomeFlavour.DONGHUA) "Donghua picks" else "Anime picks",
+            items = picks, onOpen = onOpen, onShowAll = {
+                onGrid(if (flavour == HomeFlavour.DONGHUA) "Donghua picks" else "Anime picks", "all", "16", if (flavour == HomeFlavour.DEFAULT) "ja" else animLang, "popularity.desc", "", "")
+            },
+        )
+        HomeDiscoveryRow(title = "All-time greats", items = greats, onOpen = onOpen, onShowAll = {
+            onGrid("All-time greats", "all", if (flavour == HomeFlavour.DEFAULT) "" else "16", animLang, "vote_average.desc", "2000", "")
+        })
+        HomeDiscoveryRow(title = "Coming soon", items = soon, onOpen = onOpen, onShowAll = {
+            onGrid("Coming soon", "movie", if (flavour == HomeFlavour.DEFAULT) "" else "16", animLang, "popularity.desc", "", tomorrow)
+        })
+    }
+}
+
+/** One discovery row: red-bar header with Show All plus a horizontal rail
+ *  of badge+rating cards (ranked numerals for Top 10). Empty finals hide. */
+@Composable
+private fun HomeDiscoveryRow(
+    title: String,
+    items: List<MediaItem>?,
+    onOpen: (MediaItem) -> Unit,
+    onShowAll: () -> Unit,
+    ranked: Boolean = false,
+) {
+    if (items != null && items.isEmpty()) return
+    Column(Modifier.fillMaxWidth()) {
+        HomeSectionHeader(title, onShowAll = onShowAll)
+        if (items == null) {
+            LazyRow(
+                contentPadding = PaddingValues(horizontal = 16.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                items(5) {
+                    Box(
+                        Modifier
+                            .width(110.dp)
+                            .aspectRatio(2f / 3f)
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(MaterialTheme.colorScheme.surfaceVariant)
+                    )
+                }
+            }
+        } else {
+            LazyRow(
+                contentPadding = PaddingValues(horizontal = 16.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                itemsIndexed(items, key = { _, m -> m.type.name + "|" + m.id }) { i, m ->
+                    if (ranked) HomeTop10Card(rank = i + 1, item = m, onClick = { onOpen(m) })
+                    else HomeDiscoveryCard(item = m, onClick = { onOpen(m) }, modifier = Modifier.width(110.dp))
+                }
+            }
+        }
+    }
+}
+
+/** Portrait card with type badge + rating, for the discovery rails. */
+@Composable
+private fun HomeDiscoveryCard(
+    item: MediaItem,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Column(
+        modifier
+            .clip(RoundedCornerShape(12.dp))
+            .clickable(onClick = onClick),
+    ) {
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .aspectRatio(2f / 3f)
+                .clip(RoundedCornerShape(12.dp))
+                .background(MaterialTheme.colorScheme.surfaceVariant)
+        ) {
+            AsyncImage(
+                model = Artwork.model(item),
+                contentDescription = item.title,
+                modifier = Modifier.fillMaxSize(),
+                contentScale = ContentScale.Crop,
+            )
+            val typeLabel = when (item.type) {
+                MediaType.SERIES -> "Series"
+                MediaType.MOVIE -> "Movie"
+                else -> ""
+            }
+            if (typeLabel.isNotBlank()) {
+                Box(
+                    Modifier
+                        .align(Alignment.TopStart)
+                        .padding(6.dp)
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(androidx.compose.ui.graphics.Color.Black.copy(alpha = 0.65f))
+                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                ) {
+                    Text(
+                        typeLabel,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = androidx.compose.ui.graphics.Color.White,
+                        fontSize = 10.sp,
+                    )
+                }
+            }
+        }
+        Text(
+            item.title,
+            style = MaterialTheme.typography.bodySmall,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+            color = MaterialTheme.colorScheme.onSurface,
+            modifier = Modifier.padding(top = 6.dp, start = 2.dp, end = 2.dp),
+        )
+        if ((item.rating ?: 0.0) > 0) {
+            Text(
+                "★ " + String.format(java.util.Locale.US, "%.1f", item.rating),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(start = 2.dp, top = 1.dp),
+            )
+        }
+    }
+}
+
+/** Ranked Top 10 cell: oversized numeral beside the badge+rating card. */
+@Composable
+private fun HomeTop10Card(rank: Int, item: MediaItem, onClick: () -> Unit) {
+    Row(
+        Modifier.width(150.dp),
+        verticalAlignment = Alignment.Bottom,
+    ) {
+        Text(
+            rank.toString(),
+            style = MaterialTheme.typography.displayLarge,
+            fontWeight = FontWeight.Black,
+            color = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.padding(end = 4.dp, bottom = 30.dp),
+        )
+        HomeDiscoveryCard(item = item, onClick = onClick, modifier = Modifier.weight(1f))
+    }
+}
 
 internal data class HomeGenre(
     val name: String,

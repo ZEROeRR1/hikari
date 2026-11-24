@@ -1,7 +1,9 @@
 package com.hikari.app.tv
 
-import androidx.compose.animation.Crossfade
+import androidx.compose.animation.core.AnimationSpec
 import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
@@ -9,6 +11,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -25,13 +28,23 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Bookmark
+import androidx.compose.material.icons.filled.BookmarkBorder
+import androidx.compose.material.icons.filled.ChevronRight
+import androidx.compose.material3.Icon
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -43,13 +56,17 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import coil.compose.AsyncImage
 import com.hikari.app.data.MediaItem
 import com.hikari.app.data.MediaType
 import com.hikari.app.HikariApp
@@ -111,8 +128,18 @@ object TvHomeMetrics {
 
     @Composable
     fun infoHeight(): Dp {
-        val h = LocalConfiguration.current.screenHeightDp
+        val h = TvUi.screenHeightDp()
         return (h * 0.35f).coerceIn(150f, 260f).dp
+    }
+
+    /** TV FIX: the Home hero block (title logo, ratings, plot, buttons) is now as tall
+     *  as in the reference design — a bit over half the screen — instead of the old small
+     *  35% strip. The shelves keep their own card size ([cardHeight]) and peek in
+     *  underneath, exactly like the reference's "Continue Watching" row. */
+    @Composable
+    fun heroHeight(): Dp {
+        val h = TvUi.screenHeightDp()
+        return (h * 0.54f).coerceIn(200f, 800f).dp
     }
 
     /** True where the info block is short, so the header trims itself. */
@@ -123,7 +150,7 @@ object TvHomeMetrics {
      *  the next one fit in the space under the header and the info block. */
     @Composable
     fun cardHeight(): Dp {
-        val h = LocalConfiguration.current.screenHeightDp
+        val h = TvUi.screenHeightDp()
         val rowsArea = h - HEADER_BAR_DP - infoHeight().value
         val solved = (rowsArea - SHELF_CHROME_DP) / (1f + PEEK_FRACTION)
         // Settings -> Customize -> Poster cards: the size chosen for the shape
@@ -134,9 +161,149 @@ object TvHomeMetrics {
 
 private class TvStageArt(val model: Any?, val wide: Boolean)
 
+/**
+ * An image that fades in once it has really loaded (a card or a backdrop never
+ * "pops" in, and nothing is drawn while the picture is still on its way). [onLoaded]
+ * / [onFailed] tell the caller, so it can keep the previous picture underneath
+ * until the new one is ready.
+ */
+@Composable
+private fun TvFadeImage(
+    model: Any?,
+    description: String?,
+    modifier: Modifier,
+    contentScale: ContentScale,
+    alignment: Alignment = Alignment.Center,
+    fadeMs: Int = 300,
+    onLoaded: (() -> Unit)? = null,
+    onFailed: (() -> Unit)? = null,
+) {
+    var loaded by remember(model) { mutableStateOf(false) }
+    val spec: AnimationSpec<Float> = if (fadeMs <= 0) snap() else tween(fadeMs)
+    val fade = animateFloatAsState(
+        targetValue = if (loaded) 1f else 0f,
+        animationSpec = spec,
+        label = "tvFadeImage",
+    )
+    AsyncImage(
+        model = model,
+        contentDescription = description,
+        contentScale = contentScale,
+        alignment = alignment,
+        modifier = modifier.graphicsLayer { this.alpha = fade.value },
+        onSuccess = {
+            loaded = true
+            onLoaded?.invoke()
+        },
+        onError = { onFailed?.invoke() },
+    )
+}
+
+/** One backdrop picture for the Home stage. Wide art is cropped to the top-right
+ *  block; a title that only has a portrait poster gets the poster drawn WHOLE beside
+ *  a blurred copy of itself (never a giant beheaded crop). */
+@Composable
+private fun TvStageArtImage(
+    art: TvStageArt,
+    title: String?,
+    fadeMs: Int,
+    onLoaded: (() -> Unit)? = null,
+    onFailed: (() -> Unit)? = null,
+) {
+    Box(Modifier.fillMaxSize()) {
+        if (art.wide) {
+            TvFadeImage(
+                model = art.model,
+                description = title,
+                contentScale = ContentScale.Crop,
+                alignment = Artwork.CINEMA_ALIGNMENT,
+                fadeMs = fadeMs,
+                onLoaded = onLoaded,
+                onFailed = onFailed,
+                modifier = Modifier
+                    .fillMaxWidth(0.80f)
+                    .fillMaxHeight(0.80f)
+                    .align(Alignment.TopEnd),
+            )
+        } else {
+            TvFadeImage(
+                model = art.model,
+                description = null,
+                contentScale = ContentScale.Crop,
+                fadeMs = fadeMs,
+                modifier = Modifier
+                    .fillMaxWidth(0.80f)
+                    .fillMaxHeight(0.80f)
+                    .align(Alignment.TopEnd)
+                    .blur(24.dp, BlurredEdgeTreatment.Unbounded),
+            )
+            TvFadeImage(
+                model = art.model,
+                description = title,
+                contentScale = ContentScale.Fit,
+                alignment = Alignment.CenterEnd,
+                fadeMs = fadeMs,
+                onLoaded = onLoaded,
+                onFailed = onFailed,
+                modifier = Modifier
+                    .fillMaxWidth(0.80f)
+                    .fillMaxHeight(0.62f)
+                    .align(Alignment.TopEnd)
+                    .padding(top = 64.dp, end = 56.dp),
+            )
+        }
+    }
+}
+
+/**
+ * The picture behind the Home header. The PREVIOUS title's picture stays on screen
+ * until the new one has finished loading and then the new one fades in over it, so
+ * the stage never goes black while the remote moves from card to card (it used to:
+ * the old picture faded out at once and the new one was still downloading).
+ */
+@Composable
+private fun TvStageArtLayer(art: TvStageArt?, title: String?) {
+    var base by remember { mutableStateOf<TvStageArt?>(null) }
+    var ready by remember { mutableStateOf<TvStageArt?>(null) }
+    val target = art?.takeIf { it.model != null }
+
+    // This title has no picture at all: do not leave the previous title's one up.
+    LaunchedEffect(target) {
+        if (target == null) {
+            base = null
+            ready = null
+        }
+    }
+    // The new picture finished fading in: it is the base from now on.
+    LaunchedEffect(ready) {
+        val r = ready ?: return@LaunchedEffect
+        delay(360)
+        base = r
+    }
+
+    Box(Modifier.fillMaxSize()) {
+        val b = base
+        if (b != null) {
+            TvStageArtImage(b, title, fadeMs = 0)
+        }
+        if (target != null && target !== b) {
+            key(target) {
+                TvStageArtImage(
+                    art = target,
+                    title = title,
+                    fadeMs = 320,
+                    onLoaded = { ready = target },
+                    onFailed = { base = null },
+                )
+            }
+        }
+    }
+}
+
 @Composable
 fun TvHomeBackdropLayer(item: MediaItem?, modifier: Modifier = Modifier) {
     val bg = Color(0xFF090A0F)
+    val context = LocalContext.current
     Box(modifier = modifier.fillMaxSize().background(bg)) {
         if (item != null) {
             var tmdbArt by remember(item.uniqueId) { mutableStateOf<String?>(null) }
@@ -146,10 +313,22 @@ fun TvHomeBackdropLayer(item: MediaItem?, modifier: Modifier = Modifier) {
                 }.getOrNull()?.takeIf { it.isNotBlank() }
             }
             val tmdb = tmdbArt
-            val art = remember(item.uniqueId, tmdb) {
+            // Read OUTSIDE remember on purpose: these re-run when the art lookup lands,
+            // so a title whose poster / backdrop was still being looked up when the card
+            // appeared no longer stays on an empty stage for good.
+            val libBackdrop = Artwork.backdrop(item)
+            val libPoster = Artwork.poster(item)
+            // TMDB "original" is a 4K-class file: on a 1080p box it only makes the stage
+            // slow (or fail) to appear. Take it only on a real 4K panel.
+            val bigPanel = remember(context) {
+                context.resources.displayMetrics.widthPixels >= 2400
+            }
+            val art = remember(item.uniqueId, tmdb, libBackdrop, libPoster, bigPanel) {
                 if (tmdb != null) {
                     TvStageArt(
-                        PosterLoader.model(tmdb.replace("/w1280/", "/original/")),
+                        PosterLoader.model(
+                            if (bigPanel) tmdb.replace("/w1280/", "/original/") else tmdb
+                        ),
                         true,
                     )
                 } else {
@@ -157,26 +336,7 @@ fun TvHomeBackdropLayer(item: MediaItem?, modifier: Modifier = Modifier) {
                     TvStageArt(hero.first, hero.second)
                 }
             }
-            Crossfade(
-                targetState = art,
-                animationSpec = tween(380),
-                label = "tvHomeArt",
-            ) { a ->
-                if (a.model != null) {
-                    Box(Modifier.fillMaxSize()) {
-                        PosterImage(
-                            model = a.model,
-                            contentDescription = item.title,
-                            contentScale = ContentScale.Crop,
-                            alignment = Artwork.CINEMA_ALIGNMENT,
-                            modifier = Modifier
-                                .fillMaxWidth(0.74f)
-                                .fillMaxHeight(0.72f)
-                                .align(Alignment.TopEnd),
-                        )
-                    }
-                }
-            }
+            TvStageArtLayer(art = art, title = item.title)
         }
         Box(
             Modifier
@@ -301,16 +461,36 @@ private fun tvHeroRuntime(minutes: Int?): String? {
 }
 
 /**
- * The TV home header — laid out like the title's detail page header:
- * provider name, title logo, "TV Series [TV-14] • 24m • Genres", the IMDb /
- * TMDB badges and the plot. Everything beyond the catalogue row's own fields
- * comes from the same lookups the detail page makes (see [tvLoadHeroMeta]),
- * for every title; nothing is invented while they are still running.
+ * The TV home header — laid out like the reference Home: the title logo, one
+ * "Movie · Thriller [18+]" line, the rating badges, the plot, one
+ * "2026 · 1h 50m · United States" line, then the Discover / bookmark / next
+ * buttons, with the carousel dots under them and the "Starring …" credit on
+ * the right. Everything beyond the catalogue row's own fields comes from the
+ * same lookups the detail page makes (see [tvLoadHeroMeta]), for every title;
+ * nothing is invented while they are still running.
+ *
+ * The buttons are optional: leave [onDiscover] null and none are drawn.
+ * [onActionsFocused] fires when the remote lands on one of them, so the Home
+ * can hand the header back to the featured carousel.
  */
 @Composable
-fun TvHomeHeroInfo(item: MediaItem?, modifier: Modifier = Modifier) {
-    val ts = TvUi.scale()
-    val compact = TvHomeMetrics.compactInfo()
+fun TvHomeHeroInfo(
+    item: MediaItem?,
+    modifier: Modifier = Modifier,
+    bookmarked: Boolean = false,
+    dotCount: Int = 0,
+    dotActive: Int = -1,
+    onDiscover: (() -> Unit)? = null,
+    onToggleBookmark: (() -> Unit)? = null,
+    onNext: (() -> Unit)? = null,
+    onActionsFocused: (() -> Unit)? = null,
+) {
+    // Every size below is written for a 540dp-tall screen and scaled to the real
+    // screen height through the density (dp AND sp), so the hero is the same share of
+    // the screen as the reference on any TV. (ts stays 1f: no double scaling.)
+    val ts = 1f
+    val baseDensity = LocalDensity.current
+    val heroScale = TvUi.chromeScale()
     var logo by remember(item?.uniqueId) { mutableStateOf<String?>(null) }
     LaunchedEffect(item?.uniqueId) {
         val current = item ?: return@LaunchedEffect
@@ -348,151 +528,214 @@ fun TvHomeHeroInfo(item: MediaItem?, modifier: Modifier = Modifier) {
         }
     }
 
-    val providerName = remember(item?.providerId) {
-        item?.providerId?.let { pid ->
-            runCatching { HikariApp.instance.providers.byId(pid)?.config?.name?.trim() }
-                .getOrNull()?.takeIf { it.isNotEmpty() }
-        }
-    }
     val ratingsFlow = remember {
         runCatching { HikariApp.instance.store.showDetailRatingFlow() }.getOrNull()
             ?: kotlinx.coroutines.flow.flowOf(true)
     }
     val showRatings by ratingsFlow.collectAsState(initial = true)
 
-    Column(
-        modifier = modifier
-            .fillMaxWidth(0.56f)
-            .padding(start = 18.dp, end = 12.dp, bottom = 6.dp),
-        verticalArrangement = Arrangement.Bottom,
+    CompositionLocalProvider(
+        LocalDensity provides Density(baseDensity.density * heroScale, baseDensity.fontScale)
     ) {
-        if (item != null) {
-            val details = meta?.extras?.details
+    Box(modifier = modifier.fillMaxSize()) {
+        Column(
+            modifier = Modifier
+                .align(Alignment.BottomStart)
+                .fillMaxWidth(0.52f)
+                .padding(start = 32.dp, end = 12.dp, bottom = 14.dp),
+            verticalArrangement = Arrangement.Bottom,
+        ) {
+            if (item != null) {
+                val details = meta?.extras?.details
 
-            // Provider eyebrow, as on the detail page.
-            if (!providerName.isNullOrBlank()) {
-                Text(
-                    text = providerName,
-                    color = Color(0xFF4DA3FF),
-                    fontSize = 12.sp * ts,
-                    fontWeight = FontWeight.Bold,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                Spacer(Modifier.height(4.dp))
-            }
+                // 1. The title: its TMDB logo, or the name in plain capitals.
+                val logoUrl = logo
+                if (!logoUrl.isNullOrBlank()) {
+                    PosterImage(
+                        model = logoUrl,
+                        contentDescription = item.title,
+                        contentScale = ContentScale.Fit,
+                        alignment = Alignment.BottomStart,
+                        modifier = Modifier
+                            .fillMaxWidth(0.72f)
+                            .heightIn(max = 76.dp),
+                    )
+                } else {
+                    Text(
+                        text = item.title.uppercase(),
+                        color = Color.White,
+                        fontSize = 36.sp,
+                        lineHeight = 42.sp,
+                        letterSpacing = 1.5.sp,
+                        fontWeight = FontWeight.ExtraBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
 
-            val logoUrl = logo
-            if (!logoUrl.isNullOrBlank()) {
-                PosterImage(
-                    model = logoUrl,
-                    contentDescription = item.title,
-                    contentScale = ContentScale.Fit,
-                    alignment = Alignment.BottomStart,
-                    modifier = Modifier
-                        .fillMaxWidth(0.68f)
-                        .heightIn(max = if (compact) 42.dp else 54.dp),
-                )
-            } else {
-                Text(
-                    text = item.title.uppercase(),
-                    color = Color.White,
-                    fontSize = (if (compact) 22.sp else 26.sp) * ts,
-                    lineHeight = (if (compact) 26.sp else 31.sp) * ts,
-                    letterSpacing = 1.5.sp,
-                    fontWeight = FontWeight.ExtraBold,
-                    maxLines = if (compact) 1 else 2,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
+                Spacer(Modifier.height(8.dp))
 
-            Spacer(Modifier.height(6.dp))
-
-            // One meta line, like the detail page: year, type, age-rating
-            // chip, runtime, genres.
-            val typeLabel = when (item.type) {
-                MediaType.SERIES -> tr("TV Series")
-                MediaType.MOVIE -> tr("Movie")
-                else -> item.rawType.replaceFirstChar { it.uppercase() }.takeIf { it.isNotBlank() }
-            }
-            val metaHead = listOfNotNull(
-                (item.year ?: details?.year)?.toString(),
-                typeLabel?.takeIf { it.isNotBlank() },
-            ).joinToString("  •  ")
-            val certLabel = details?.certification?.trim()?.takeIf { it.isNotEmpty() }
-            val genreLine = item.genres.take(3).ifEmpty { details?.genres.orEmpty().take(3) }
-                .joinToString(", ")
-            val metaTail = listOfNotNull(
-                tvHeroRuntime(details?.runtimeMinutes),
-                genreLine.takeIf { it.isNotBlank() },
-            ).joinToString("  •  ")
-            if (metaHead.isNotBlank() || certLabel != null || metaTail.isNotBlank()) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    if (metaHead.isNotBlank()) {
-                        Text(
-                            text = metaHead,
-                            color = Color.White.copy(alpha = 0.88f),
-                            fontSize = 12.sp * ts,
-                            fontWeight = FontWeight.Medium,
-                            maxLines = 1,
-                        )
-                    }
-                    if (certLabel != null) TvCertChip(certLabel)
-                    if (metaTail.isNotBlank()) {
-                        Text(
-                            text = (if (metaHead.isNotBlank() || certLabel != null) "•  " else "") + metaTail,
-                            color = Color.White.copy(alpha = 0.72f),
-                            fontSize = 12.sp * ts,
-                            fontWeight = FontWeight.Medium,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.weight(1f, fill = false),
-                        )
+                // 2. "Movie · Thriller" + the age-rating chip.
+                val typeLabel = when (item.type) {
+                    MediaType.SERIES -> tr("TV Show")
+                    MediaType.MOVIE -> tr("Movie")
+                    else -> item.rawType.replaceFirstChar { it.uppercase() }.takeIf { it.isNotBlank() }
+                }
+                val firstGenre = item.genres.firstOrNull()
+                    ?: details?.genres.orEmpty().firstOrNull()
+                val typeLine = listOfNotNull(
+                    typeLabel?.takeIf { it.isNotBlank() },
+                    firstGenre?.takeIf { it.isNotBlank() },
+                ).joinToString("  ·  ")
+                val certLabel = details?.certification?.trim()?.takeIf { it.isNotEmpty() }
+                if (typeLine.isNotBlank() || certLabel != null) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        if (typeLine.isNotBlank()) {
+                            Text(
+                                text = typeLine,
+                                color = Color.White.copy(alpha = 0.92f),
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f, fill = false),
+                            )
+                        }
+                        if (certLabel != null) TvCertChip(certLabel)
                     }
                 }
-            }
 
-            // IMDb + TMDB (+ AniList for anime) badges — the detail page's row.
-            if (showRatings) {
-                val badges = meta?.ratings.orEmpty()
-                    .filter {
-                        it.source == RatingSource.IMDB ||
+                // 3. Rating badges: TMDB, IMDb, Rotten Tomatoes, Metacritic.
+                if (showRatings) {
+                    val badges = meta?.ratings.orEmpty()
+                        .filter {
                             it.source == RatingSource.TMDB ||
-                            it.source == RatingSource.ANILIST
+                                it.source == RatingSource.IMDB ||
+                                it.source == RatingSource.TOMATOMETER ||
+                                it.source == RatingSource.METACRITIC ||
+                                it.source == RatingSource.ANILIST
+                        }
+                        .sortedBy {
+                            when (it.source) {
+                                RatingSource.TMDB -> 0
+                                RatingSource.IMDB -> 1
+                                RatingSource.TOMATOMETER -> 2
+                                RatingSource.METACRITIC -> 3
+                                else -> 4
+                            }
+                        }
+                        .take(4)
+                    if (badges.isNotEmpty()) {
+                        Spacer(Modifier.height(7.dp))
+                        TvHeroRatingBadges(badges, ts)
                     }
-                    .sortedBy {
-                        when (it.source) {
-                            RatingSource.IMDB -> 0
-                            RatingSource.TMDB -> 1
-                            else -> 2
+                }
+
+                // 4. The plot: TMDB's localized text first (like the detail
+                // page), the catalogue row's own blurb only where that is blank.
+                val overview = meta?.extras?.overview?.trim().orEmpty()
+                    .ifEmpty { item.overview?.trim().orEmpty() }
+                if (overview.isNotEmpty()) {
+                    Spacer(Modifier.height(7.dp))
+                    Text(
+                        text = overview,
+                        color = Color.White.copy(alpha = 0.82f),
+                        fontSize = 13.sp,
+                        lineHeight = 18.sp,
+                        maxLines = 3,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+
+                // 5. "2026 · 1h 50m · United States".
+                val infoLine = listOfNotNull(
+                    (item.year ?: details?.year)?.toString(),
+                    tvHeroRuntime(details?.runtimeMinutes),
+                    details?.country?.trim()?.takeIf { it.isNotEmpty() },
+                ).joinToString("  ·  ")
+                if (infoLine.isNotBlank()) {
+                    Spacer(Modifier.height(7.dp))
+                    Text(
+                        text = infoLine,
+                        color = Color.White.copy(alpha = 0.78f),
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Medium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+
+                // 6. Discover / bookmark / next.
+                if (onDiscover != null) {
+                    Spacer(Modifier.height(12.dp))
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        TvHeroPillButton(
+                            label = tr("Discover"),
+                            ts = ts,
+                            onClick = onDiscover,
+                            onFocused = onActionsFocused,
+                        )
+                        if (onToggleBookmark != null) {
+                            TvHeroCircleButton(
+                                icon = if (bookmarked) Icons.Filled.Bookmark else Icons.Filled.BookmarkBorder,
+                                description = tr("Bookmark"),
+                                onClick = onToggleBookmark,
+                                onFocused = onActionsFocused,
+                            )
+                        }
+                        if (onNext != null) {
+                            TvHeroCircleButton(
+                                icon = Icons.Filled.ChevronRight,
+                                description = tr("Next"),
+                                onClick = onNext,
+                                onFocused = onActionsFocused,
+                            )
                         }
                     }
-                if (badges.isNotEmpty()) {
-                    Spacer(Modifier.height(6.dp))
-                    TvHeroRatingBadges(badges, ts)
                 }
             }
-
-            // The plot: TMDB's localized text first (like the detail page),
-            // the catalogue row's own blurb only where that is blank.
-            val overview = meta?.extras?.overview?.trim().orEmpty()
-                .ifEmpty { item.overview?.trim().orEmpty() }
-            if (overview.isNotEmpty()) {
-                Spacer(Modifier.height(6.dp))
-                Text(
-                    text = overview,
-                    color = Color.White.copy(alpha = 0.88f),
-                    fontSize = 12.5.sp * ts,
-                    lineHeight = 17.sp * ts,
-                    maxLines = if (compact) 2 else 3,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
         }
+
+        // The "Starring …" credit, bottom right (never for anime, where the
+        // lookup returns characters, not actors).
+        val extras = meta?.extras
+        val starring = if (item != null && extras != null && !extras.castIsCharacters) {
+            extras.cast.take(3).map { it.name.trim() }.filter { it.isNotEmpty() }.joinToString(", ")
+        } else {
+            ""
+        }
+        if (starring.isNotEmpty()) {
+            Text(
+                text = tr("Starring") + " " + starring,
+                color = Color.White.copy(alpha = 0.70f),
+                fontSize = 12.sp,
+                lineHeight = 16.sp,
+                maxLines = 3,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(end = 32.dp, bottom = 16.dp)
+                    .widthIn(max = 280.dp),
+            )
+        }
+
+        // Carousel dots, centred under the buttons.
+        if (dotCount > 1) {
+            TvHomeHeroDots(
+                count = dotCount,
+                active = dotActive,
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = 3.dp),
+            )
+        }
+    }
     }
 }
 
@@ -509,47 +752,139 @@ private fun tvHeroRatingColor(source: RatingSource): Color = when (source) {
 private fun tvHeroRatingLabel(source: RatingSource): String = when (source) {
     RatingSource.IMDB -> "IMDb"
     RatingSource.TMDB -> "TMDB"
-    RatingSource.ANILIST -> "AL"
+    RatingSource.ANILIST -> "AniList"
     RatingSource.TOMATOMETER -> "RT"
     RatingSource.POPCORN -> "RT"
-    RatingSource.METACRITIC -> "MC"
+    RatingSource.METACRITIC -> "Metacritic"
     RatingSource.LETTERBOXD -> "LB"
 }
 
-/** The detail page's small dark rating pills, minus the click: the header is
- *  display-only, so it never takes D-pad focus away from the shelves. */
+/** The small tinted rating pills (TMDB 6.8 · IMDb 7.0 · RT 86% · Metacritic
+ *  68), display-only: the header never takes D-pad focus away from the
+ *  shelves because of them. */
 @Composable
 private fun TvHeroRatingBadges(ratings: List<TitleRating>, scale: Float) {
     Row(
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         ratings.forEach { r ->
+            val tint = tvHeroRatingColor(r.source)
             val shape = RoundedCornerShape(6.dp)
             Row(
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(5.dp),
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
                 modifier = Modifier
                     .clip(shape)
-                    .background(Color.Black.copy(alpha = 0.55f))
-                    .border(0.5.dp, Color.White.copy(alpha = 0.18f), shape)
-                    .padding(horizontal = 7.dp, vertical = 3.dp),
+                    .background(tint.copy(alpha = 0.16f))
+                    .border(0.5.dp, tint.copy(alpha = 0.40f), shape)
+                    .padding(horizontal = 6.dp, vertical = 2.dp),
             ) {
                 Text(
                     text = tvHeroRatingLabel(r.source),
-                    fontSize = 11.sp * scale,
+                    fontSize = 10.5.sp * scale,
                     fontWeight = FontWeight.ExtraBold,
-                    color = tvHeroRatingColor(r.source),
+                    color = tint,
                     maxLines = 1,
                 )
                 Text(
                     text = r.value,
-                    fontSize = 12.sp * scale,
+                    fontSize = 11.5.sp * scale,
                     fontWeight = FontWeight.Bold,
-                    color = Color.White,
+                    color = tint,
                     maxLines = 1,
                 )
             }
+        }
+    }
+}
+
+/** "Discover": a dark glass pill that turns solid white under the remote. */
+@Composable
+private fun TvHeroPillButton(
+    label: String,
+    ts: Float,
+    onClick: () -> Unit,
+    onFocused: (() -> Unit)?,
+) {
+    var focused by remember { mutableStateOf(false) }
+    val shape = RoundedCornerShape(50)
+    Box(
+        modifier = Modifier
+            .height(36.dp)
+            .onFocusChanged { st ->
+                val now = st.hasFocus
+                if (focused != now) {
+                    focused = now
+                    if (now) onFocused?.invoke()
+                }
+            }
+            .clip(shape)
+            .background(if (focused) Color.White else Color.Black.copy(alpha = 0.50f))
+            .border(1.dp, Color.White.copy(alpha = if (focused) 0f else 0.20f), shape)
+            .tvPress(onClick = onClick)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 20.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = label,
+            color = if (focused) Color(0xFF0A0B10) else Color.White,
+            fontSize = 13.5.sp * ts,
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 1,
+        )
+    }
+}
+
+/** The round icon buttons next to Discover (bookmark, next title). */
+@Composable
+private fun TvHeroCircleButton(
+    icon: ImageVector,
+    description: String,
+    onClick: () -> Unit,
+    onFocused: (() -> Unit)?,
+) {
+    var focused by remember { mutableStateOf(false) }
+    Box(
+        modifier = Modifier
+            .size(36.dp)
+            .onFocusChanged { st ->
+                val now = st.hasFocus
+                if (focused != now) {
+                    focused = now
+                    if (now) onFocused?.invoke()
+                }
+            }
+            .clip(CircleShape)
+            .background(if (focused) Color.White else Color.Black.copy(alpha = 0.50f))
+            .border(1.dp, Color.White.copy(alpha = if (focused) 0f else 0.20f), CircleShape)
+            .tvPress(onClick = onClick)
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = description,
+            tint = if (focused) Color(0xFF0A0B10) else Color.White,
+            modifier = Modifier.size(19.dp),
+        )
+    }
+}
+
+/** Tiny carousel dots; the lit one is a wider white bar. */
+@Composable
+private fun TvHomeHeroDots(count: Int, active: Int, modifier: Modifier = Modifier) {
+    Row(modifier = modifier, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+        for (i in 0 until count.coerceAtMost(8)) {
+            Box(
+                Modifier
+                    .size(width = if (i == active) 14.dp else 4.dp, height = 4.dp)
+                    .clip(RoundedCornerShape(2.dp))
+                    .background(
+                        if (i == active) Color.White else Color.White.copy(alpha = 0.35f)
+                    )
+            )
         }
     }
 }
@@ -657,6 +992,33 @@ fun TvExpandingMediaRow(
     }
 }
 
+/** The poster drawn whole on a blurred, darkened copy of itself. */
+@Composable
+private fun BoxScope.TvPosterOnBlur(model: Any?, title: String?) {
+    PosterImage(
+        model = model,
+        contentDescription = title,
+        contentScale = ContentScale.Crop,
+        modifier = Modifier
+            .fillMaxSize()
+            .blur(16.dp, BlurredEdgeTreatment.Unbounded),
+    )
+    Box(
+        Modifier
+            .fillMaxSize()
+            .background(Color.Black.copy(alpha = 0.32f))
+    )
+    PosterImage(
+        model = model,
+        contentDescription = title,
+        contentScale = ContentScale.Crop,
+        modifier = Modifier
+            .align(Alignment.Center)
+            .fillMaxHeight()
+            .aspectRatio(2f / 3f),
+    )
+}
+
 @Composable
 private fun TvExpandingPosterCard(
     item: MediaItem,
@@ -703,12 +1065,21 @@ private fun TvExpandingPosterCard(
         }
     }
 
-    val portraitModel = remember(item) { Artwork.model(item) }
-    val expandedModel = remember(item, tmdbBackdrop) {
+    // Read OUTSIDE remember: these re-run when the art lookup lands, so a card whose
+    // provider gave no poster (or no wide art) is repainted once the lookup finds one
+    // instead of staying an empty square for good. Only the cards that need them read
+    // the lookup, so shelves do not all repaint on every lookup that finishes.
+    val libPoster = if (item.posterUrl.isNullOrBlank()) Artwork.poster(item) else null
+    val libBackdrop = if (wide) Artwork.backdrop(item) else null
+    val portraitModel = remember(item, libPoster) { Artwork.model(item) }
+    // null = this title has NO wide art (yet): the card then shows the whole poster on
+    // a blurred copy of itself, never a beheaded crop and never an empty box.
+    val wideModel = remember(item, tmdbBackdrop, libBackdrop) {
         when {
             !tmdbBackdrop.isNullOrBlank() -> PosterLoader.model(tmdbBackdrop!!)
             !item.backdropUrl.isNullOrBlank() -> PosterLoader.model(item.backdropUrl)
-            else -> Artwork.tvHeroModel(item).first ?: portraitModel
+            !libBackdrop.isNullOrBlank() -> PosterLoader.model(libBackdrop)
+            else -> null
         }
     }
 
@@ -733,42 +1104,27 @@ private fun TvExpandingPosterCard(
             .tvPress(onClick = onClick, onHold = onQuickPlay)
             .clickable(onClick = onClick),
     ) {
-        // Landscape at rest, title with no wide art at all: the poster is drawn
-        // whole on a blurred copy of itself (never a beheaded crop).
-        val restHero = if (landscape && !focused) Artwork.tvHeroModel(item) else null
-        val posterOnlyLandscape = restHero != null && !restHero.second &&
-            tmdbBackdrop.isNullOrBlank() && item.backdropUrl.isNullOrBlank()
-        if (posterOnlyLandscape) {
-            PosterImage(
-                model = restHero?.first ?: portraitModel,
-                contentDescription = item.title,
-                contentScale = ContentScale.Crop,
-                modifier = Modifier
-                    .fillMaxSize()
-                    .blur(16.dp, BlurredEdgeTreatment.Unbounded),
-            )
-            Box(
-                Modifier
-                    .fillMaxSize()
-                    .background(Color.Black.copy(alpha = 0.32f))
-            )
+        if (!wide) {
             PosterImage(
                 model = portraitModel,
                 contentDescription = item.title,
                 contentScale = ContentScale.Crop,
-                modifier = Modifier
-                    .align(Alignment.Center)
-                    .fillMaxHeight()
-                    .aspectRatio(2f / 3f),
-            )
-        } else {
-            PosterImage(
-                model = if (wide && expandedModel != null) expandedModel else portraitModel,
-                contentDescription = item.title,
-                contentScale = ContentScale.Crop,
-                alignment = if (wide) Artwork.CINEMA_ALIGNMENT else Alignment.Center,
+                alignment = Alignment.Center,
                 modifier = Modifier.fillMaxSize(),
             )
+        } else {
+            // Bottom layer: the poster, never blank while the wide art is on its way.
+            TvPosterOnBlur(model = portraitModel, title = item.title)
+            // Top layer: the wide art, fading in once it has really loaded.
+            if (wideModel != null) {
+                TvFadeImage(
+                    model = wideModel,
+                    description = item.title,
+                    contentScale = ContentScale.Crop,
+                    alignment = Artwork.CINEMA_ALIGNMENT,
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
         }
 
         if (wide) {

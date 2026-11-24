@@ -1,4 +1,87 @@
 
+## 0.12.151
+
+- Apple TV+ and Prime Video tiles use your transparent logos (black glyph / blue smile on transparency, verified on-tile): printed on the tile, no black or white pasted box, wide fill kept
+
+## 0.12.150
+
+- All 9 streaming tiles are wide TV wordmarks now: Netflix / Hulu / Paramount+ / Crunchyroll replaced with wide art (same TMDB logos you liked, bundled instant), padded so nothing touches the edges; Disney+ / Apple TV+ / Prime Video / Peacock keep your wide logos
+
+## 0.12.149
+
+- Streaming tiles use your wide Disney+ / Apple TV+ / Prime Video / Peacock logos, cropped to fill the landscape box; Home row prefers bundled art over the square TMDB stamp so all 9 tiles fill evenly
+
+## 0.12.148
+
+- Coming soon shows only truly unreleased movies (release_date after today); already-released titles like Spider-Man / Hail Mary never leak in again
+- Streaming service grids fixed: provider filter now always sends a watch region (US default) so Crunchyroll/Netflix/etc. only return titles actually streaming there — no more Iron Man / Black Mirror randoms
+
+## 0.12.147
+
+- Discovery rows now follow your watching per extension: most-recent watch in the opened extension sets the basis (Spiderman -> Spiderman recs, Death Note -> Death Note recs), rows genre/type-matched to it
+- No more wrong rows: movie basis never leaks into donghua/anime titles, Coming soon and Airing now hide in extension mode instead of showing released items as upcoming
+- Anime/Donghua picks personalized to your genres with daily rotation; Top 10 personalized; Greats reversed-personalized
+- Player renamed Testing Player UI -> Hikari Player and auto-selected on update (old TV/Minimal defaults migrate; explicit Cinema/Neon/Default kept; change anytime in Settings)
+## 0.12.146
+
+- Testing dialogs match Testing UI: caption-style editor, Audio-only vs Audio+video choice and Hindi/Tamil/Telugu/English track picker now use the dark Testing rows/text instead of TV glass; portrait Testing tabs scroll instead of clipping
+- Streaming tiles are thinner small rectangles like marked (110dp wide, 54dp tall)
+- Immersive 2 shows vertical poster art so Dune/Blue Road fit perfectly in the tall frame
+- Discovery rows build from the selected extension: Anime4i open shows donghua across Hot/Top 10/Series/Picks instead of TMDB movies/anime
+- Search keyboard white bar fixed: Search screen resizes with the keyboard (imePadding) on app background so no white strip shows
+## 0.12.145
+
+- Testing player tap fixed: first tap shows and stays 5s, second tap hides — no more show-and-blink (600ms show guard, re-arm only while visible)
+- Streaming tiles now use light plates with TMDB wordmarks preferred (full-fit like the detail screen), so HBO and all logos read instead of dark-on-dark squares
+- More genres tile is half height (small rectangle)
+- Testing Audio now lists every in-stream track under THIS STREAM (English/Hindi/etc. with codec detail + loading row), not just Default
+- Testing Subtitles gains Italic, Background and Edge rows plus clearer sync row; More gains Stats and Decoder
+- All player dialogs (Resume/Start over, Load from internet, decoder) use the Testing dark sheet under the Testing skin, never TV glass
+
+## 0.12.144
+
+- Explore genres: every tile now carries a real thumbnail (anime tags fall back to title search, then trending, so no bare letter tiles), and the big More genres card shows a collage too
+- Streaming services row is now wide landscape cinema tiles instead of square logos in a box
+- Testing Player UI Audio tab shows the playing stream's real audio languages (English/Hindi/etc., codec/channel detail, loading state) with switching, not just Default
+- Testing panel hides after 5s of no touch only — any touch/scroll re-arms it — and tapping outside the right-side box closes it
+- Testing Subtitles/More reach full parity: Load from internet, Sync, Off/Auto, all tracks, Add external, Make from voice, Remove added, Caption style, Position, Find automatically, plus Captions/PiP/Rotate in More
+
+## 0.12.143
+
+- Home Discovery rows are back as a catalogue: Hot right now, If you like, Top 10, Series watching, In cinemas (Airing now for animation), Anime/Donghua picks, All-time greats and Coming soon, with badges, ratings and Show All everywhere — shifting with the picked extension, hideable from Settings → Customize → Discovery rows
+- Testing Player UI is now a full one-to-one rebuild of the reference player: same top bar, center play cluster, title/time/ends-at line, seek bar and pill, with Sources, Quality, Audio, Subtitles, Speed and More tabs holding every existing Hikari option
+- Explore genres has a More tile opening the full genre list in the same card UI with search; the top wide Genres card is gone
+- Streaming row carries real service logos including new Crunchyroll, bundled in-app so tiles paint instantly on the first frame with no network
+
+## 0.12.142
+
+- Streaming tiles are instant real brand wordmarks (local, first frame, readable on brand colours) with taps arming in parallel in the background
+- Immersive 2 is full-bleed again like the reference (tall frame, crop to fill) with same-URL poster/backdrop guard plus backdrop retry so portrait-only items heal
+- New Testing Player UI entry in Settings Player UI: reference-style dark skin with white rounded play button, same settings and sheets, other skins untouched
+
+## 0.12.141
+
+- Immersive 2 banner is taller like the reference (about seven tenths of the screen), with tighter bottom spacing
+- Odyssey-style art no longer beheads: Immersive 2 never hard-crops, portrait art shows full on a blurred fill, and same-URL poster/backdrop mixups no longer flag as wide
+- Streaming services tiles paint instantly with local brand badges, network logos swap in when they arrive
+
+## 0.12.140
+
+- Immersive 2 banner is now big like the reference: taller frame owning the top of the screen with the header floating over the art, and portrait art shows as a full poster on a blurred fill instead of a beheading crop
+- Streaming services row now shows on Home in every state: tapping a studio with an extension picked asks Only this extension (progressively matches the extension's shelves against the studio) — unlimited Everything grid stays one tap away
+- Taskbar Anime tab renamed to Upcoming
+- Player zoom no longer moves subtitles: fit/crop/stretch and pinch zoom scale only the picture, captions stay screen-fixed in size and position
+
+## 0.12.139
+
+- Search genre browsing now loads page after page with a Load more button and a live title count, so big studios and genres are never cut off after the first pages; the Sci-Fi explore card is fixed (it looked up the wrong name and spun forever) and dead cards now show a letter tile instead of spinning
+- Filter sheet genres sit outside like the reference app: the core genres are chips you tap directly, the full list stays behind More genres
+- Home catalogue restyled like the reference: red-bar section titles with red Show All, a Streaming services logo row and Explore genres tiles, plus a new Immersive 2 banner option with a Play button and add/info buttons (top bar, taskbar and Continue Watching untouched)
+
+## 0.12.138
+
+- Search tab redesigned: suggestion chips, trending-today rail, and genre explore cards on the idle screen; all filters moved into a Discover-style sheet (sources, type, genres, release year with From/To, upcoming toggle, rating with slider, votes, language) opened from the new filter button beside translate; studio grid searches TMDB by production company
+
 ## 0.12.137
 
 - Detail pages now load in a blink: cast, trailers, production, and recommendation rows fetch at the same time instead of one after another, the full pass starts immediately instead of waiting on slow sources, and last visit's sections survive app restarts
