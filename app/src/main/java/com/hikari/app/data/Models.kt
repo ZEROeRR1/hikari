@@ -510,6 +510,7 @@ data class Collection(
      *  behave like a folder row you own rather than something you have to
      *  remember to select. */
     val pinToTop: Boolean = false,
+    val openByDefault: Boolean = false,
     /** Rows (the default) or a tab strip per folder — see [CollectionViewModes]. */
     val viewMode: String = CollectionViewModes.ROWS,
     /** Give the Tabs view an extra "All" tab holding every folder's catalogs. */
