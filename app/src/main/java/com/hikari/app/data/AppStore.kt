@@ -109,6 +109,7 @@ class AppStore(private val ctx: Context) {
         val DISCOVERY_ROWS = booleanPreferencesKey("discoveryRows")
         /** Home Explore-genres row (Settings → Customize). ON = shown. */
         val EXPLORE_GENRES = booleanPreferencesKey("exploreGenres")
+        val STREAMING_SERVICES = booleanPreferencesKey("streamingServices")
         /** One-time reset: the 0.12.155 update turns Discovery rows OFF for
          *  everyone who had them ON (they can turn them back on after). */
         val DISCOVERY_ROWS_RESET_155 = booleanPreferencesKey("discoveryRowsReset155")
@@ -3532,6 +3533,13 @@ fun searchExceptionOnFlow(): Flow<Boolean> =
 
     suspend fun setExploreGenres(enabled: Boolean) {
         write("EXPLORE_GENRES") { it[K.EXPLORE_GENRES] = enabled }
+    }
+
+    fun streamingServicesFlow(): Flow<Boolean> =
+        store.data.map { it[K.STREAMING_SERVICES] ?: true }.distinctUntilChanged().flowOn(Dispatchers.Default)
+
+    suspend fun setStreamingServices(enabled: Boolean) {
+        write("STREAMING_SERVICES") { it[K.STREAMING_SERVICES] = enabled }
     }
 
     suspend fun discoveryRowsReset155(): Boolean =
