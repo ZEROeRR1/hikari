@@ -260,6 +260,13 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {    private val m
             applySelection(
                 if (multi.isNotEmpty()) multi else listOfNotNull(single.ifBlank { null })
             )
+                        val defaultCol = runCatching {
+                store.collections().firstOrNull { it.openByDefault }
+            }.getOrNull()
+            if (defaultCol != null) {
+                applySelection(listOf("$COLLECTION_PREFIX${defaultCol.id}"))
+            }
+
             // From here on the selection is real, so the watchers below may act.
             restored.complete(Unit)
             loadInternal()
