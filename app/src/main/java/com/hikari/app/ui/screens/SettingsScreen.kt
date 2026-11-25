@@ -75,6 +75,7 @@ import androidx.compose.material.icons.filled.BugReport
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.ColorLens
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.Dashboard
 import androidx.compose.material.icons.filled.Delete
@@ -628,6 +629,11 @@ fun SettingsScreen(nav: NavHostController) {
     var checkingUpdates by remember { mutableStateOf(false) }
     var updateStatus by remember { mutableStateOf<Updater.UpdateStatus?>(null) }
     var showUpdateDialog by remember { mutableStateOf(false) }
+    // Settings → Sources & Extensions → Clone site: the whole flow lives
+    // here (never leaves Settings) — same screens as the Extensions tab.
+    var clonePickOpen by remember { mutableStateOf(false) }
+    var cloneEditId by rememberSaveable { mutableStateOf<String?>(null) }
+
     var openFolder by remember { mutableStateOf<SettingsFolder?>(null) }
     var settingsQuery by remember { mutableStateOf("") }
     val searchHits = remember(settingsQuery) {
@@ -695,10 +701,12 @@ fun SettingsScreen(nav: NavHostController) {
     val profileActive by Profiles.activeId.collectAsState()
 
     BackHandler(
-        enabled = openSub != null || (openFolder != null && !isTv) || showStats || showLogs ||
+        enabled = cloneEditId != null || clonePickOpen || openSub != null || (openFolder != null && !isTv) || showStats || showLogs ||
             showPair || showProfiles || showPlayerStyle || showPlayerGestures || showPosterCards,
     ) {
         when {
+            cloneEditId != null -> cloneEditId = null
+            clonePickOpen -> clonePickOpen = false
             showPosterCards -> showPosterCards = false
             showPlayerStyle -> showPlayerStyle = false
             showPlayerGestures -> showPlayerGestures = false
@@ -763,6 +771,42 @@ fun SettingsScreen(nav: NavHostController) {
     // the actions on them (see ProfilesScreen).
     if (showProfiles) {
         ProfilesScreen(app, onBack = { showProfiles = false })
+        return
+    }
+
+    // Clone site (Sources & Extensions folder) is a full page too: the
+    // searchable picker plus the new-domain editor, same as the Extensions
+    // tab — Back returns to Sources & Extensions, never to another tab.
+    // (tr() is composable-only, so the toast texts are read here, outside
+    // the save/delete callbacks.)
+    val cloneInstalledMsg = tr("Clone installed")
+    val cloneRemovedMsg = tr("Clone removed")
+    if (cloneEditId != null && installedProviders.any { it.config.id == cloneEditId }) {
+        CloneEditScreen(
+            orig = installedProviders.first { it.config.id == cloneEditId }.config,
+            onSaved = {
+                cloneEditId = null
+                clonePickOpen = false
+                scope.launch { runCatching { app.providers.refresh() } }
+                Toast.makeText(context, cloneInstalledMsg, Toast.LENGTH_SHORT).show()
+            },
+            onBack = { cloneEditId = null },
+        )
+        return
+    }
+    if (clonePickOpen) {
+        ClonePickScreen(
+            providers = installedProviders,
+            onPick = { cfg -> cloneEditId = cfg.id },
+            onBack = { clonePickOpen = false; cloneEditId = null },
+            onDelete = { cfg ->
+                scope.launch {
+                    runCatching { app.store.removeProvider(cfg.id) }
+                    runCatching { app.providers.refresh() }
+                    Toast.makeText(context, cloneRemovedMsg, Toast.LENGTH_SHORT).show()
+                }
+            },
+        )
         return
     }
 
@@ -841,6 +885,14 @@ fun SettingsScreen(nav: NavHostController) {
                         SettingsCard(top = 2.dp) {
                             ExtensionsShortcutCard(installedProviders.size) {
                                 Routes.navigateTab(nav, Routes.EXTENSIONS)
+                            }
+                        }
+                    }
+                    item {
+                        SettingsCard {
+                            CloneSiteShortcutCard {
+                                cloneEditId = null
+                                clonePickOpen = true
                             }
                         }
                     }
@@ -1036,6 +1088,7 @@ fun SettingsScreen(nav: NavHostController) {
                     item { SettingsCard { PlayerStyleCard(onOpen = { showPlayerStyle = true }) } }
                     item { SettingsCard { PlayerGesturesCard(onOpen = { showPlayerGestures = true }) } }
                     item { SettingsCard { DiscoveryRowsCard(app) } }
+                    item { SettingsCard { ExploreGenresCard(app) } }
                 }
                 SettingsFolder.CATALOG -> {
                     item {
@@ -1694,6 +1747,54 @@ private fun ExtensionsShortcutCard(installed: Int, onOpen: () -> Unit) {
 }
 
 @Composable
+private fun CloneSiteShortcutCard(onOpen: () -> Unit) {
+    GlassCard(
+        onClick = onOpen,
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 15.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            SettingsThemeTile(Icons.Filled.ContentCopy, "Clone", 44.dp)
+            Spacer(Modifier.width(14.dp))
+            Column(Modifier.weight(1f)) {
+                Text(
+                    tr("Clone site"),
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Spacer(Modifier.height(3.dp))
+                if (!LocalHideHelp.current) {
+                Text(
+                    "Moved domain? Clone an extension with its new domain.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                }
+            }
+            Spacer(Modifier.width(10.dp))
+            Box(
+                Modifier
+                    .size(28.dp)
+                    .clip(GlassShape)
+                    .background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.06f)),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(18.dp)
+                )
+            }
+        }
+    }
+}
+
+@Composable
 private fun ContinueWatchingCard(
     app: HikariApp,
     hideContinue: Boolean,
@@ -1840,6 +1941,45 @@ private fun DiscoveryRowsCard(app: HikariApp) {
                 },
                 modifier = Modifier.tvToggle(on) { v ->
                     scope.launch { runCatching { app.store.setDiscoveryRows(v) } }
+                },
+            )
+        }
+    }
+}
+
+@Composable
+private fun ExploreGenresCard(app: HikariApp) {
+    val scope = rememberCoroutineScope()
+    val flow = remember { app.store.exploreGenresFlow() }
+    val on by flow.collectAsState(initial = true)
+    Column(Modifier.padding(16.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text(
+                    tr("Explore genres"),
+                    style = MaterialTheme.typography.titleSmall,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+                Spacer(Modifier.height(4.dp))
+                if (!LocalHideHelp.current) {
+                Text(
+                    tr(
+                        "The genre tiles on Home. Off hides them there — " +
+                            "the Search tab keeps showing them."
+                    ),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                }
+            }
+            Spacer(Modifier.width(12.dp))
+            Switch(
+                checked = on,
+                onCheckedChange = { v ->
+                    scope.launch { runCatching { app.store.setExploreGenres(v) } }
+                },
+                modifier = Modifier.tvToggle(on) { v ->
+                    scope.launch { runCatching { app.store.setExploreGenres(v) } }
                 },
             )
         }
@@ -3384,6 +3524,9 @@ private fun DetailHeaderCard(app: HikariApp) {
     var logoSlider by remember { mutableStateOf(logoSize.toFloat()) }
     LaunchedEffect(logoSize) { logoSlider = logoSize.toFloat() }
 
+    val logoOnFlow = remember { app.store.detailLogoEnabledFlow() }
+    val logoOn by logoOnFlow.collectAsState(initial = true)
+
     Column(Modifier.padding(16.dp)) {
         SettingsCardHeading(Icons.Filled.Panorama, tr("Details header"))
         ChoiceRow(
@@ -3392,28 +3535,41 @@ private fun DetailHeaderCard(app: HikariApp) {
             leadingIcon = Icons.Filled.Panorama,
             onClick = { pickerOpen = true },
         )
-        Spacer(Modifier.height(14.dp))
-        SettingsSlider(
-            label = tr("Title logo size"),
-            value = logoSlider,
-            valueText = logoSlider.roundToInt().toString() + "%",
-            valueRange = 50f..160f,
-            // 111 single-percent positions between 50% and 160% (110 gaps): the
-            // slider moves one point at a time instead of leaping in tens.
-            steps = 109,
-            onValueChange = { v -> logoSlider = v.roundToInt().toFloat().coerceIn(50f, 160f) },
-            onValueChangeFinished = {
-                val pct = logoSlider.roundToInt().coerceIn(50, 160)
-                logoSlider = pct.toFloat()
-                scope.launch { runCatching { app.store.setDetailLogoSize(pct) } }
+        Spacer(Modifier.height(10.dp))
+        SettingsToggle(
+            label = tr("Title artwork"),
+            supporting = if (logoOn) {
+                tr("Show the title logo over the header, and as the pinned title")
+            } else {
+                tr("Show the title as plain text")
             },
+            checked = logoOn,
+            onCheckedChange = { on -> scope.launch { runCatching { app.store.setDetailLogoEnabled(on) } } },
         )
-        if (!LocalHideHelp.current) {
-        Text(
-            tr("How big the title artwork is drawn — over the header image, and as the pinned title once it scrolls up"),
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
+        if (logoOn) {
+            Spacer(Modifier.height(10.dp))
+            SettingsSlider(
+                label = tr("Title logo size"),
+                value = logoSlider,
+                valueText = logoSlider.roundToInt().toString() + "%",
+                valueRange = 50f..160f,
+                // 111 single-percent positions between 50% and 160% (110 gaps): the
+                // slider moves one point at a time instead of leaping in tens.
+                steps = 109,
+                onValueChange = { v -> logoSlider = v.roundToInt().toFloat().coerceIn(50f, 160f) },
+                onValueChangeFinished = {
+                    val pct = logoSlider.roundToInt().coerceIn(50, 160)
+                    logoSlider = pct.toFloat()
+                    scope.launch { runCatching { app.store.setDetailLogoSize(pct) } }
+                },
+            )
+            if (!LocalHideHelp.current) {
+            Text(
+                tr("How big the title artwork is drawn — over the header image, and as the pinned title once it scrolls up"),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            }
         }
     }
 
@@ -4906,9 +5062,9 @@ private fun Cs3RecommendationsCard(app: HikariApp) {
         icon = Icons.Filled.ViewModule,
         title = tr("Recommendations source"),
         summary = when (source) {
-            "tmdb" -> tr("CloudStream titles: TMDB recommendations")
-            "both" -> tr("CloudStream titles: TMDB plus the plugin's own")
-            else -> tr("CloudStream titles: the plugin's own recommendations")
+            "tmdb" -> tr("Extension titles: TMDB recommendations")
+            "both" -> tr("Extension titles: TMDB plus the extension's own")
+            else -> tr("Extension titles: the extension's own recommendations")
         },
     ) {
         Row(
@@ -4927,7 +5083,7 @@ private fun Cs3RecommendationsCard(app: HikariApp) {
                     style = MaterialTheme.typography.bodyMedium
                 )
                 Text(
-                    tr("Show the recommendations the CloudStream plugin returns, like the CloudStream app. TMDB is used only when the plugin has none"),
+                    tr("Show the recommendations the extension itself returns, from the same extension only. TMDB is used only when the extension has none"),
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )

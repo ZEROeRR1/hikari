@@ -1,10 +1,14 @@
 package com.hikari.app.player
 
 import androidx.activity.compose.BackHandler
+import android.content.Context
 import androidx.compose.foundation.background
-import androidx.compose.foundation.horizontalScroll
-import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -28,16 +32,21 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.ClosedCaption
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Forward10
 import androidx.compose.material.icons.filled.GraphicEq
+import androidx.compose.material.icons.filled.HighQuality
+import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material.icons.filled.Replay10
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Smartphone
+import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -47,6 +56,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -54,13 +64,30 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Shadow
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.unit.toSize
+import com.hikari.app.ui.AccentStore
+import com.hikari.app.ui.theme.inkOn
 import kotlinx.coroutines.delay
+import kotlin.math.roundToInt
 
 /** One selectable row in the Testing panel. [key] goes back to the
  *  activity, which knows what every key means. */
@@ -175,14 +202,47 @@ class TActions(
 
 private val TSheetBg = Color(0xF2141418)
 private val TRowBg = Color(0xFF232328)
-private val TSelBg = Color(0xFF5A3D1E)
-private val TAccent = Color(0xFFE8A33D)
 private val TMuted = Color(0xFFA7A7B0)
 private val TPillBg = Color(0xCC1E1E24)
+/** Soft drop shadow so free-floating header/seek text reads on bright video. */
+private val TShadow = Shadow(color = Color(0xCC000000), offset = Offset(0f, 2f), blurRadius = 6f)
 
-/** Reference-style Testing overlay: main controls plus the right-side
- *  tabbed panel holding every player option. [get] is polled twice a
- *  second so time, rows and marks stay fresh. */
+/** Where the tool rail lives: edge side + vertical fraction, remembered. */
+private const val RAIL_PREFS = "hikari_rail"
+private fun loadRailRight(ctx: Context): Boolean =
+    runCatching {
+        ctx.getSharedPreferences(RAIL_PREFS, Context.MODE_PRIVATE).getBoolean("right", true)
+    }.getOrDefault(true)
+private fun loadRailFrac(ctx: Context): Float =
+    runCatching {
+        ctx.getSharedPreferences(RAIL_PREFS, Context.MODE_PRIVATE).getFloat("y", 0.5f)
+    }.getOrDefault(0.5f).coerceIn(0f, 1f)
+private fun saveRail(ctx: Context, right: Boolean, frac: Float) {
+    runCatching {
+        ctx.getSharedPreferences(RAIL_PREFS, Context.MODE_PRIVATE).edit()
+            .putBoolean("right", right).putFloat("y", frac.coerceIn(0f, 1f)).apply()
+    }
+}
+
+/** The player's live accent: the app accent while "Match app & player theme"
+ *  is on, otherwise the player's own accent (Settings → Appearance & Theme).
+ *  Teal in the mockups is just one pick — every user gets their own colour
+ *  on the play disc, the seek bar, the badges, the radios and the tabs. */
+@Composable
+private fun tAccent(): Color = AccentStore.player(LocalContext.current).mid
+
+/** Ink (icon/text) drawn on top of the solid accent. */
+@Composable
+private fun tOnAccent(): Color = inkOn(tAccent())
+
+/** Wash behind selected rows and cells on the dark sheet. */
+@Composable
+private fun tSelBg(): Color = tAccent().copy(alpha = 0.16f)
+
+/** Hikari Player overlay: card chrome (header card, accent disc, ends-at
+ *  seek row, side tool rail) plus the icon-rail option panel holding every
+ *  player option. [get] is polled twice a second so time, rows and marks
+ *  stay fresh. */
 @Composable
 fun TestingPlayerOverlay(get: () -> TState, act: TActions) {
     var tick by remember { mutableIntStateOf(0) }
@@ -195,102 +255,190 @@ fun TestingPlayerOverlay(get: () -> TState, act: TActions) {
     val s = remember(tick) { get() }
     var tab by remember { mutableStateOf<TTab?>(null) }
     var subAppearance by remember { mutableStateOf(false) }
+    // Tool-rail dock: edge side + vertical fraction, remembered across plays.
+    val railCtx = LocalContext.current
+    var railRight by remember { mutableStateOf(loadRailRight(railCtx)) }
+    var railFrac by remember { mutableFloatStateOf(loadRailFrac(railCtx)) }
+    var railWpx by remember { mutableIntStateOf(0) }
+    var railHpx by remember { mutableIntStateOf(0) }
+    var railDragging by remember { mutableStateOf(false) }
+    var railDx by remember { mutableFloatStateOf(0f) }
+    var railDy by remember { mutableFloatStateOf(0f) }
+    // Player-UI rects (root coordinates) the dropped rail must not cover:
+    // overlapping any of them pushes the rail just below it.
+    var headerRect by remember { mutableStateOf(Rect.Zero) }
+    var centerRect by remember { mutableStateOf(Rect.Zero) }
+    var seekRect by remember { mutableStateOf(Rect.Zero) }
+    val railHaptic = LocalHapticFeedback.current
     BackHandler(enabled = tab != null) {
         if (subAppearance) subAppearance = false else tab = null
     }
-    val tap = Modifier.clickable(
-        interactionSource = remember { MutableInteractionSource() },
-        indication = null,
-    ) { act.toggleControls() }
+    // Tap zones on the picture: single tap shows/hides the controls;
+    // double-tap left = -10s, right = +10s, middle = play/pause — working
+    // even while the controls are showing (a plain tap catcher eats the
+    // second tap, which is why double-tap only worked with them hidden).
+    var rootWpx by remember { mutableIntStateOf(0) }
     Box(Modifier.fillMaxSize()) {
-        // Invisible tap catcher: tapping the picture hides the controls.
-        Box(Modifier.fillMaxSize().then(tap))
-        // Top bar.
+        Box(
+            Modifier
+                .fillMaxSize()
+                .onGloballyPositioned { rootWpx = it.size.width }
+                .pointerInput(Unit) {
+                    detectTapGestures(
+                        onTap = { act.toggleControls() },
+                        onDoubleTap = { off ->
+                            val third = rootWpx / 3f
+                            when {
+                                off.x < third -> act.back10()
+                                off.x > third * 2f -> act.fwd10()
+                                else -> act.togglePlay()
+                            }
+                        },
+                    )
+                }
+        )
+        // Header: title + server · quality badge · lock, floating free on
+        // the video (no bar box) with drop shadows for bright scenes.
         Row(
             Modifier
                 .fillMaxWidth()
-                .padding(start = 8.dp, end = 8.dp, top = 10.dp),
+                .padding(start = 8.dp, end = 8.dp, top = 10.dp)
+                .padding(horizontal = 6.dp, vertical = 6.dp)
+                .onGloballyPositioned { headerRect = Rect(it.positionInRoot(), it.size.toSize()) },
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            IconButton(onClick = act.back) {
-                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = Color.White)
+            Box(
+                Modifier
+                    .size(40.dp)
+                    .clip(CircleShape)
+                    .background(Color.White.copy(alpha = 0.12f))
+                    .clickable(onClick = act.back),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = Color.White, modifier = Modifier.size(22.dp))
             }
-            IconButton(onClick = act.collapse) {
+            IconButton(onClick = act.collapse, modifier = Modifier.size(40.dp)) {
                 Icon(Icons.Filled.ExpandMore, contentDescription = "Collapse", tint = Color.White)
             }
-            Spacer(Modifier.weight(1f))
-            IconButton(onClick = act.toggleLock) {
+            Column(Modifier.weight(1f).padding(horizontal = 2.dp)) {
+                Text(
+                    s.title,
+                    color = Color.White,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 17.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    style = TextStyle(shadow = TShadow),
+                )
+                Text(
+                    s.serverLine,
+                    color = Color.White.copy(alpha = 0.75f),
+                    fontSize = 12.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    style = TextStyle(shadow = TShadow),
+                )
+            }
+            if (s.badge != null) {
+                Box(
+                    Modifier
+                        .clip(RoundedCornerShape(9.dp))
+                        .border(1.dp, tAccent(), RoundedCornerShape(9.dp))
+                        .padding(horizontal = 9.dp, vertical = 5.dp),
+                ) {
+                    Text(s.badge, color = tAccent(), fontWeight = FontWeight.Bold, fontSize = 13.sp, maxLines = 1)
+                }
+                Spacer(Modifier.width(6.dp))
+            }
+            IconButton(onClick = act.toggleLock, modifier = Modifier.size(40.dp)) {
                 Icon(
                     Icons.Filled.Lock,
                     contentDescription = "Lock",
-                    tint = if (s.locked) TAccent else Color.White,
+                    tint = if (s.locked) tAccent() else Color.White,
                 )
             }
         }
-        // Centre play cluster.
+        // Centre play cluster: dark side chips around a solid accent disc.
         Row(
-            Modifier.align(Alignment.Center),
+            Modifier
+                .align(Alignment.Center)
+                .onGloballyPositioned { centerRect = Rect(it.positionInRoot(), it.size.toSize()) },
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(28.dp),
+            horizontalArrangement = Arrangement.spacedBy(30.dp),
         ) {
-            IconButton(onClick = act.back10, modifier = Modifier.size(44.dp)) {
-                Icon(Icons.Filled.Replay10, contentDescription = "-10s", tint = Color.White, modifier = Modifier.size(34.dp))
+            Box(
+                Modifier
+                    .size(52.dp)
+                    .clip(CircleShape)
+                    .background(Color.Black.copy(alpha = 0.55f))
+                    .clickable(onClick = act.back10),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(Icons.Filled.Replay10, contentDescription = "-10s", tint = Color.White, modifier = Modifier.size(28.dp))
             }
             Box(
                 Modifier
-                    .size(76.dp)
-                    .clip(RoundedCornerShape(22.dp))
-                    .background(Color.White)
+                    .size(84.dp)
+                    .clip(CircleShape)
+                    .background(tAccent())
                     .clickable(onClick = act.togglePlay),
                 contentAlignment = Alignment.Center,
             ) {
                 Icon(
                     if (s.playing) Icons.Filled.Pause else Icons.Filled.PlayArrow,
                     contentDescription = "Play",
-                    tint = Color.Black,
-                    modifier = Modifier.size(40.dp),
+                    tint = tOnAccent(),
+                    modifier = Modifier.size(44.dp),
                 )
             }
-            IconButton(onClick = act.fwd10, modifier = Modifier.size(44.dp)) {
-                Icon(Icons.Filled.Forward10, contentDescription = "+10s", tint = Color.White, modifier = Modifier.size(34.dp))
+            Box(
+                Modifier
+                    .size(52.dp)
+                    .clip(CircleShape)
+                    .background(Color.Black.copy(alpha = 0.55f))
+                    .clickable(onClick = act.fwd10),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(Icons.Filled.Forward10, contentDescription = "+10s", tint = Color.White, modifier = Modifier.size(28.dp))
             }
         }
-        // Bottom info + seek + pill.
+        // Seek row: position · ends-at · duration, then the accent bar.
+        // The side the rail is docked on stays clear of the bar.
         Column(
             Modifier
                 .align(Alignment.BottomCenter)
                 .fillMaxWidth()
-                .padding(start = 18.dp, end = 18.dp, bottom = 14.dp),
+                .padding(
+                    start = if (railRight) 18.dp else 86.dp,
+                    end = if (railRight) 86.dp else 18.dp,
+                    bottom = 14.dp,
+                )
+                .onGloballyPositioned { seekRect = Rect(it.positionInRoot(), it.size.toSize()) },
         ) {
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Bottom) {
-                Column(Modifier.weight(1f)) {
-                    Text(
-                        s.title,
-                        color = Color.White,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 20.sp,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(s.serverLine, color = Color.White.copy(alpha = 0.85f), fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
-                        if (s.badge != null) {
-                            Spacer(Modifier.width(8.dp))
-                            Text(
-                                s.badge,
-                                color = Color(0xFFFFC247),
-                                fontWeight = FontWeight.Black,
-                                fontSize = 15.sp,
-                            )
-                        }
-                    }
-                }
-                Spacer(Modifier.width(12.dp))
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Text(
-                    "${fmtT(s.posMs)} / ${fmtT(s.durMs)} · ends ${s.endsAt}",
-                    color = Color.White.copy(alpha = 0.9f),
-                    fontSize = 12.sp,
+                    fmtT(s.posMs),
+                    color = Color.White,
+                    fontWeight = FontWeight.SemiBold,
+                    fontSize = 13.sp,
                     maxLines = 1,
+                    style = TextStyle(shadow = TShadow),
+                )
+                Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
+                    Text(
+                        "Ends ${s.endsAt}",
+                        color = Color.White.copy(alpha = 0.75f),
+                        fontSize = 12.sp,
+                        maxLines = 1,
+                        style = TextStyle(shadow = TShadow),
+                    )
+                }
+                Text(
+                    fmtT(s.durMs),
+                    color = Color.White.copy(alpha = 0.9f),
+                    fontSize = 13.sp,
+                    maxLines = 1,
+                    style = TextStyle(shadow = TShadow),
                 )
             }
             val frac = if (s.durMs > 0) (s.posMs.toFloat() / s.durMs.toFloat()).coerceIn(0f, 1f) else 0f
@@ -300,98 +448,175 @@ fun TestingPlayerOverlay(get: () -> TState, act: TActions) {
                 modifier = Modifier.fillMaxWidth().height(22.dp),
                 colors = SliderDefaults.colors(
                     thumbColor = Color.White,
-                    activeTrackColor = Color.White.copy(alpha = 0.9f),
+                    activeTrackColor = tAccent(),
                     inactiveTrackColor = Color.White.copy(alpha = 0.25f),
                 ),
             )
-            Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-                Row(
-                    Modifier
-                        .clip(RoundedCornerShape(24.dp))
-                        .background(TPillBg)
-                        .padding(horizontal = 10.dp, vertical = 6.dp),
-                    horizontalArrangement = Arrangement.spacedBy(4.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    TPillCc(on = s.captionsOn, onClick = act.toggleCaptions)
-                    TPillIcon(Icons.Filled.GraphicEq, "Audio", s.audioOthers.isNotEmpty(), onClick = { tab = TTab.AUDIO })
-                    TPillIcon(Icons.Filled.Tune, "More", false, onClick = { tab = TTab.MORE })
-                    TPillIcon(Icons.Filled.Smartphone, "Rotate", false, onClick = act.rotate)
-                    TPillCc(on = false, text = "PiP", onClick = act.pip)
-                }
+        }
+        // Tool rail: hold it for half a second and it lifts — drag it
+        // anywhere, and on release it stays exactly where it lands
+        // (left/right edge follows whichever side the drop leans past).
+        // If the drop overlaps any player UI (header/lock, play cluster,
+        // seek row), the rail sits just below that item instead of over it.
+        // The dock (side + height) is remembered across plays.
+        BoxWithConstraints(Modifier.fillMaxSize()) {
+            val density = LocalDensity.current
+            val maxWpx = with(density) { maxWidth.toPx() }
+            val maxHpx = with(density) { maxHeight.toPx() }
+            val marginPx = with(density) { 10.dp.toPx() }
+            // Free vertical dock: the rail stays exactly where it is
+            // dropped (fraction of the full height, only kept on screen).
+            val freeHpx = (maxHpx - railHpx).coerceAtLeast(0f)
+            val dockedTopPx = railFrac * freeHpx
+            val dockedLeftPx = if (railRight) maxWpx - railWpx - marginPx else marginPx
+            Column(
+                Modifier
+                    .align(Alignment.TopStart)
+                    .offset {
+                        IntOffset(
+                            (dockedLeftPx + railDx).roundToInt(),
+                            (dockedTopPx + railDy).roundToInt(),
+                        )
+                    }
+                    .onGloballyPositioned { railWpx = it.size.width; railHpx = it.size.height }
+                    .graphicsLayer {
+                        val z = if (railDragging) 1.08f else 1f
+                        scaleX = z; scaleY = z
+                    }
+                    .clip(RoundedCornerShape(20.dp))
+                    .background(if (railDragging) Color(0xE61E1E24) else TPillBg)
+                    .pointerInput(Unit) {
+                        detectDragGesturesAfterLongPress(
+                            onDragStart = {
+                                railHaptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                railDragging = true; railDx = 0f; railDy = 0f
+                            },
+                            onDrag = { change, amount ->
+                                change.consume(); railDx += amount.x; railDy += amount.y
+                            },
+                            onDragEnd = {
+                                railDragging = false
+                                val dropCx = dockedLeftPx + railDx + railWpx / 2f
+                                railRight = dropCx >= maxWpx / 2f
+                                val dropLeft = if (railRight) maxWpx - railWpx - marginPx else marginPx
+                                var top = (dockedTopPx + railDy).coerceIn(0f, freeHpx)
+                                // Never cover player UI: if the dropped rail
+                                // overlaps anything (header/lock, play
+                                // cluster, seek row), sit just below it.
+                                var guard = 0
+                                while (guard++ < 6) {
+                                    val hit = listOf(headerRect, centerRect, seekRect)
+                                        .filter { r ->
+                                            r.width > 0f && r.height > 0f &&
+                                                dropLeft < r.right && dropLeft + railWpx > r.left &&
+                                                top < r.bottom && top + railHpx > r.top
+                                        }
+                                        .minByOrNull { it.top } ?: break
+                                    top = hit.bottom + marginPx
+                                }
+                                railFrac = if (freeHpx > 0f) {
+                                    top.coerceIn(0f, freeHpx) / freeHpx
+                                } else 0.5f
+                                railDx = 0f; railDy = 0f
+                                saveRail(railCtx, railRight, railFrac)
+                            },
+                            onDragCancel = { railDragging = false; railDx = 0f; railDy = 0f },
+                        )
+                    }
+                    .padding(horizontal = 5.dp, vertical = 9.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                TPillCc(on = s.captionsOn, onClick = act.toggleCaptions)
+                TPillIcon(Icons.Filled.GraphicEq, "Audio", s.audioOthers.isNotEmpty(), onClick = { tab = TTab.AUDIO })
+                TPillIcon(Icons.Filled.Tune, "More", false, onClick = { tab = TTab.MORE })
+                TPillIcon(Icons.Filled.Smartphone, "Rotate", false, onClick = act.rotate)
+                TPillCc(on = false, text = "PiP", onClick = act.pip)
             }
         }
-        // Right-side tabbed panel. Tapping anywhere outside it (the dimmed
-        // video area on the left) closes it — it never stays open on its own.
+        // Option panel: a card holding a vertical icon rail plus the tab's
+        // content. Landscape keeps it on the right; portrait pins it to the
+        // bottom. Tapping the dimmed video area closes it.
         if (tab != null) {
             val t = tab!!
-            Row(Modifier.fillMaxSize()) {
-                Box(
-                    Modifier
-                        .weight(1f)
-                        .fillMaxHeight()
-                        .background(Color.Black.copy(alpha = 0.45f))
-                        .clickable(
-                            interactionSource = remember { MutableInteractionSource() },
-                            indication = null,
-                        ) { tab = null; subAppearance = false },
-                )
-                val cfg = LocalConfiguration.current
-                val isPortrait = cfg.orientation == android.content.res.Configuration.ORIENTATION_PORTRAIT
-                Column(
-                    Modifier
-                        .fillMaxWidth(if (isPortrait) 0.85f else 0.62f)
-                        .fillMaxSize()
-                        .background(TSheetBg)
-                        .clickable(
-                            interactionSource = remember { MutableInteractionSource() },
-                            indication = null,
-                        ) {}
-                        .padding(vertical = 12.dp),
-                ) {
-                    Row(
+            val cfg = LocalConfiguration.current
+            val isPortrait = cfg.orientation == android.content.res.Configuration.ORIENTATION_PORTRAIT
+            val tabTitle = when (t) {
+                TTab.SOURCES -> "Sources"
+                TTab.QUALITY -> "Quality"
+                TTab.AUDIO -> "Audio"
+                TTab.SUBTITLES -> "Subtitles"
+                TTab.SPEED -> "Speed"
+                TTab.MORE -> "More"
+            }
+            val close = { tab = null; subAppearance = false }
+            if (isPortrait) {
+                Box(Modifier.fillMaxSize()) {
+                    Box(
                         Modifier
+                            .fillMaxSize()
+                            .background(Color.Black.copy(alpha = 0.45f))
+                            .clickable(
+                                interactionSource = remember { MutableInteractionSource() },
+                                indication = null,
+                            ) { close() },
+                    )
+                    Column(
+                        Modifier
+                            .align(Alignment.BottomCenter)
                             .fillMaxWidth()
-                            .padding(horizontal = 10.dp)
-                            .clip(RoundedCornerShape(14.dp))
-                            .background(TRowBg)
-                            .horizontalScroll(rememberScrollState())
-                            .padding(3.dp),
-                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                            .fillMaxHeight(0.68f)
+                            .clip(RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp))
+                            .background(TSheetBg)
+                            .padding(vertical = 12.dp),
                     ) {
-                        for (tt in TTab.entries) {
-                            val sel = tt == t
-                            Box(
-                                Modifier
-                                    .clip(RoundedCornerShape(11.dp))
-                                    .background(if (sel) Color(0xFF4A4A52) else Color.Transparent)
-                                    .clickable { tab = tt; subAppearance = false }
-                                    .padding(horizontal = 8.dp, vertical = 7.dp),
-                            ) {
+                        Row(Modifier.weight(1f).fillMaxWidth()) {
+                            TRail(t, onPick = { tab = it; subAppearance = false })
+                            Column(Modifier.weight(1f).fillMaxHeight()) {
                                 Text(
-                                    when (tt) {
-                                        TTab.SOURCES -> "Sources"
-                                        TTab.QUALITY -> "Quality"
-                                        TTab.AUDIO -> "Audio"
-                                        TTab.SUBTITLES -> "Subtitles"
-                                        TTab.SPEED -> "Speed"
-                                        TTab.MORE -> "More"
-                                    },
-                                    color = if (sel) Color.White else TMuted,
-                                    fontSize = 12.sp,
-                                    fontWeight = if (sel) FontWeight.Bold else FontWeight.Normal,
+                                    tabTitle,
+                                    color = Color.White,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 18.sp,
+                                    modifier = Modifier.padding(start = 16.dp, top = 4.dp, bottom = 6.dp),
                                 )
+                                TTabContent(t, s, act, subAppearance, onAppearance = { subAppearance = it })
                             }
                         }
                     }
-                    Spacer(Modifier.height(10.dp))
-                    when (t) {
-                        TTab.SOURCES -> TSourceList(s, act)
-                        TTab.QUALITY -> TQualityList(s, act)
-                        TTab.AUDIO -> TAudioList(s, act)
-                        TTab.SUBTITLES -> TSubList(s, act, subAppearance, onAppearance = { subAppearance = it })
-                        TTab.SPEED -> TSpeedList(s, act)
-                        TTab.MORE -> TMoreList(s, act)
+                }
+            } else {
+                Row(Modifier.fillMaxSize()) {
+                    Box(
+                        Modifier
+                            .weight(1f)
+                            .fillMaxHeight()
+                            .background(Color.Black.copy(alpha = 0.45f))
+                            .clickable(
+                                interactionSource = remember { MutableInteractionSource() },
+                                indication = null,
+                            ) { close() },
+                    )
+                    Column(
+                        Modifier
+                            .fillMaxWidth(0.62f)
+                            .fillMaxSize()
+                            .background(TSheetBg)
+                            .padding(vertical = 12.dp),
+                    ) {
+                        Row(Modifier.weight(1f).fillMaxWidth()) {
+                            TRail(t, onPick = { tab = it; subAppearance = false })
+                            Column(Modifier.weight(1f).fillMaxHeight()) {
+                                Text(
+                                    tabTitle,
+                                    color = Color.White,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 18.sp,
+                                    modifier = Modifier.padding(start = 16.dp, top = 4.dp, bottom = 6.dp),
+                                )
+                                TTabContent(t, s, act, subAppearance, onAppearance = { subAppearance = it })
+                            }
+                        }
                     }
                 }
             }
@@ -427,7 +652,7 @@ private fun TPillCc(on: Boolean, onClick: () -> Unit, text: String = "CC") {
                 .padding(top = 2.dp)
                 .size(4.dp)
                 .clip(CircleShape)
-                .background(if (on) TAccent else Color.Transparent)
+                .background(if (on) tAccent() else Color.Transparent)
         )
     }
 }
@@ -442,7 +667,7 @@ private fun TPillIcon(icon: androidx.compose.ui.graphics.vector.ImageVector, des
             Modifier
                 .size(4.dp)
                 .clip(CircleShape)
-                .background(if (dot) TAccent else Color.Transparent)
+                .background(if (dot) tAccent() else Color.Transparent)
         )
     }
 }
@@ -458,18 +683,99 @@ private fun TSection(label: String) {
     )
 }
 
+private fun tabIcon(tt: TTab): androidx.compose.ui.graphics.vector.ImageVector = when (tt) {
+    TTab.SOURCES -> Icons.Filled.Layers
+    TTab.QUALITY -> Icons.Filled.HighQuality
+    TTab.AUDIO -> Icons.Filled.GraphicEq
+    TTab.SUBTITLES -> Icons.Filled.ClosedCaption
+    TTab.SPEED -> Icons.Filled.Speed
+    TTab.MORE -> Icons.Filled.MoreVert
+}
+
+/** The panel's vertical icon rail: one accent disc per tab. */
+@Composable
+private fun TRail(sel: TTab, onPick: (TTab) -> Unit) {
+    Column(
+        Modifier.width(58.dp).padding(top = 2.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        for (tt in TTab.entries) {
+            val on = tt == sel
+            Box(
+                Modifier
+                    .size(44.dp)
+                    .clip(CircleShape)
+                    .background(if (on) tAccent() else Color.Transparent)
+                    .clickable { onPick(tt) },
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    tabIcon(tt),
+                    contentDescription = tt.name,
+                    tint = if (on) tOnAccent() else Color.White,
+                    modifier = Modifier.size(24.dp),
+                )
+            }
+        }
+    }
+}
+
+/** The rail-selected tab's list. */
+@Composable
+private fun TTabContent(
+    t: TTab,
+    s: TState,
+    act: TActions,
+    appearance: Boolean,
+    onAppearance: (Boolean) -> Unit,
+) {
+    when (t) {
+        TTab.SOURCES -> TSourceList(s, act)
+        TTab.QUALITY -> TQualityList(s, act)
+        TTab.AUDIO -> TAudioList(s, act)
+        TTab.SUBTITLES -> TSubList(s, act, appearance, onAppearance = onAppearance)
+        TTab.SPEED -> TSpeedList(s, act)
+        TTab.MORE -> TMoreList(s, act)
+    }
+}
+
 @Composable
 private fun TRow(opt: TOption, onClick: (Int) -> Unit, chevron: Boolean = false) {
+    val sel = opt.selected
+    val ac = tAccent()
     Row(
         Modifier
             .fillMaxWidth()
             .padding(horizontal = 10.dp, vertical = 3.dp)
             .clip(RoundedCornerShape(12.dp))
-            .background(if (opt.selected) TSelBg else TRowBg)
+            .background(if (sel) tSelBg() else TRowBg)
+            .then(if (sel) Modifier.border(1.dp, ac, RoundedCornerShape(12.dp)) else Modifier)
             .clickable { onClick(opt.key) }
             .padding(horizontal = 14.dp, vertical = 11.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        // Radio: hollow when off, accent dot when on (navigation rows keep
+        // the chevron instead).
+        if (!chevron) {
+            Box(
+                Modifier
+                    .size(20.dp)
+                    .clip(CircleShape)
+                    .border(2.dp, if (sel) ac else TMuted, CircleShape),
+                contentAlignment = Alignment.Center,
+            ) {
+                if (sel) {
+                    Box(
+                        Modifier
+                            .size(10.dp)
+                            .clip(CircleShape)
+                            .background(ac),
+                    )
+                }
+            }
+            Spacer(Modifier.width(10.dp))
+        }
         Column(Modifier.weight(1f)) {
             Text(opt.label, color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
             if (opt.sub != null) {
@@ -477,12 +783,18 @@ private fun TRow(opt: TOption, onClick: (Int) -> Unit, chevron: Boolean = false)
             }
         }
         if (opt.badge != null) {
-            Text(opt.badge, color = TAccent, fontSize = 12.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(start = 8.dp))
+            Box(
+                Modifier
+                    .padding(start = 8.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .border(1.dp, ac, RoundedCornerShape(8.dp))
+                    .padding(horizontal = 8.dp, vertical = 3.dp),
+            ) {
+                Text(opt.badge, color = ac, fontSize = 12.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+            }
         }
-        if (opt.selected) {
-            Icon(Icons.Filled.Check, contentDescription = null, tint = TAccent, modifier = Modifier.size(18.dp).padding(start = 4.dp))
-        } else if (chevron) {
-            Icon(Icons.AutoMirrored.Filled.ArrowForward, contentDescription = null, tint = TMuted, modifier = Modifier.size(18.dp))
+        if (chevron) {
+            Icon(Icons.AutoMirrored.Filled.ArrowForward, contentDescription = null, tint = TMuted, modifier = Modifier.size(18.dp).padding(start = 4.dp))
         }
     }
 }
@@ -498,12 +810,13 @@ private fun TSourceList(s: TState, act: TActions) {
                     .fillMaxWidth()
                     .padding(horizontal = 10.dp, vertical = 3.dp)
                     .clip(RoundedCornerShape(12.dp))
-                    .background(if (v.selected) TSelBg else TRowBg)
+                    .background(if (v.selected) tSelBg() else TRowBg)
+                    .then(if (v.selected) Modifier.border(1.dp, tAccent(), RoundedCornerShape(12.dp)) else Modifier)
                     .clickable { act.selectServer(v.index) }
                     .padding(horizontal = 14.dp, vertical = 11.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text("${i + 1}", color = TAccent, fontWeight = FontWeight.Bold, fontSize = 14.sp, modifier = Modifier.width(22.dp))
+                Text("${i + 1}", color = tAccent(), fontWeight = FontWeight.Bold, fontSize = 14.sp, modifier = Modifier.width(22.dp))
                 Column(Modifier.weight(1f)) {
                     Text(v.name, color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     if (v.detail != null) {
@@ -572,7 +885,7 @@ private fun TSubList(s: TState, act: TActions, appearance: Boolean, onAppearance
                     Modifier
                         .weight(1f)
                         .clip(RoundedCornerShape(9.dp))
-                        .background(if (sel) Color(0xFF4A4A52) else Color.Transparent)
+                        .background(if (sel) tSelBg() else Color.Transparent)
                         .clickable(onClick = fn)
                         .padding(vertical = 8.dp),
                     contentAlignment = Alignment.Center,
@@ -601,7 +914,7 @@ private fun TSubList(s: TState, act: TActions, appearance: Boolean, onAppearance
                             Text("Load from internet", color = Color.White, fontSize = 15.sp)
                             Text("Search every subtitle site and addon", color = TMuted, fontSize = 12.sp)
                         }
-                        Icon(Icons.AutoMirrored.Filled.ArrowForward, contentDescription = null, tint = TAccent)
+                        Icon(Icons.AutoMirrored.Filled.ArrowForward, contentDescription = null, tint = tAccent())
                     }
                 }
                 item {
@@ -616,7 +929,7 @@ private fun TSubList(s: TState, act: TActions, appearance: Boolean, onAppearance
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Text("Subtitle sync & position", color = Color.White, fontSize = 15.sp, modifier = Modifier.weight(1f))
-                        Icon(Icons.AutoMirrored.Filled.ArrowForward, contentDescription = null, tint = TAccent)
+                        Icon(Icons.AutoMirrored.Filled.ArrowForward, contentDescription = null, tint = tAccent())
                     }
                 }
                 item { TRow(s.subOff, onClick = { act.subOff() }) }
@@ -684,7 +997,7 @@ private fun TSubList(s: TState, act: TActions, appearance: Boolean, onAppearance
                             Text("Caption style", color = Color.White, fontSize = 15.sp)
                             Text(s.captionSummary, color = TMuted, fontSize = 12.sp, maxLines = 1)
                         }
-                        Icon(Icons.AutoMirrored.Filled.ArrowForward, contentDescription = null, tint = TAccent)
+                        Icon(Icons.AutoMirrored.Filled.ArrowForward, contentDescription = null, tint = tAccent())
                     }
                 }
                 item {
@@ -724,13 +1037,13 @@ private fun TSubList(s: TState, act: TActions, appearance: Boolean, onAppearance
                             .fillMaxWidth()
                             .padding(horizontal = 10.dp, vertical = 8.dp)
                             .clip(RoundedCornerShape(12.dp))
-                            .background(if (s.subStyle.bold) TSelBg else TRowBg)
+                            .background(if (s.subStyle.bold) tSelBg() else TRowBg)
                             .clickable(onClick = act.subBold)
                             .padding(horizontal = 14.dp, vertical = 11.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Text("Bold", color = Color.White, fontSize = 15.sp, modifier = Modifier.weight(1f))
-                        if (s.subStyle.bold) Icon(Icons.Filled.Check, contentDescription = null, tint = TAccent, modifier = Modifier.size(18.dp))
+                        if (s.subStyle.bold) Icon(Icons.Filled.Check, contentDescription = null, tint = tAccent(), modifier = Modifier.size(18.dp))
                     }
                 }
                 item {
@@ -739,13 +1052,13 @@ private fun TSubList(s: TState, act: TActions, appearance: Boolean, onAppearance
                             .fillMaxWidth()
                             .padding(horizontal = 10.dp, vertical = 8.dp)
                             .clip(RoundedCornerShape(12.dp))
-                            .background(if (s.subItalic) TSelBg else TRowBg)
+                            .background(if (s.subItalic) tSelBg() else TRowBg)
                             .clickable(onClick = act.subItalicToggle)
                             .padding(horizontal = 14.dp, vertical = 11.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Text("Italic", color = Color.White, fontSize = 15.sp, modifier = Modifier.weight(1f))
-                        if (s.subItalic) Icon(Icons.Filled.Check, contentDescription = null, tint = TAccent, modifier = Modifier.size(18.dp))
+                        if (s.subItalic) Icon(Icons.Filled.Check, contentDescription = null, tint = tAccent(), modifier = Modifier.size(18.dp))
                     }
                 }
                 item {
@@ -790,7 +1103,7 @@ private fun TSubList(s: TState, act: TActions, appearance: Boolean, onAppearance
                         Spacer(Modifier.width(10.dp))
                         TCircleBtn(Icons.Filled.Add, act.subSyncPlus)
                         Spacer(Modifier.width(10.dp))
-                        Text("Reset", color = TAccent, fontSize = 14.sp, modifier = Modifier.clickable(onClick = act.subSyncReset))
+                        Text("Reset", color = tAccent(), fontSize = 14.sp, modifier = Modifier.clickable(onClick = act.subSyncReset))
                     }
                 }
                 item {
@@ -859,7 +1172,7 @@ private fun TSpeedList(s: TState, act: TActions) {
                         Modifier
                             .weight(1f)
                             .clip(RoundedCornerShape(8.dp))
-                            .background(if (o.selected) Color(0xFF4A4A52) else Color.Transparent)
+                            .background(if (o.selected) tSelBg() else Color.Transparent)
                             .clickable { act.selectSpeed(o.key) }
                             .padding(vertical = 9.dp),
                         contentAlignment = Alignment.Center,
@@ -893,7 +1206,7 @@ private fun TMoreList(s: TState, act: TActions) {
                         Modifier
                             .weight(1f)
                             .clip(RoundedCornerShape(8.dp))
-                            .background(if (o.selected) Color(0xFF4A4A52) else Color.Transparent)
+                            .background(if (o.selected) tSelBg() else Color.Transparent)
                             .clickable { act.selectAspect(o.key) }
                             .padding(vertical = 9.dp),
                         contentAlignment = Alignment.Center,

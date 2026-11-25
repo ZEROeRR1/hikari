@@ -345,6 +345,32 @@ class HikariApp : Application() {
                         store.setPlayerHikariDefaultsSeeded(true)
                     }
                 }
+                // 0.12.155: Discovery rows go OFF for everyone on update —
+                // even users who had them ON. Runs once; later choices stick.
+                if (!store.discoveryRowsReset155()) {
+                    runCatching {
+                        store.setDiscoveryRows(false)
+                        store.setDiscoveryRowsReset155(true)
+                    }
+                }
+                // 0.12.156: featured banner goes to Immersive 2 for everyone
+                // on update — even users on other styles. Runs once; they can
+                // pick another style afterwards, fresh installs start here.
+                if (!store.heroStyleSeeded156()) {
+                    runCatching {
+                        store.setHeroStyle(com.hikari.app.ui.components.HeroStyles.IMMERSIVE2)
+                        store.setHeroStyleSeeded156(true)
+                    }
+                }
+                // 0.12.157: player goes to Hikari Player for everyone on
+                // update — even users on other skins. Runs once; they can
+                // pick another skin afterwards in Settings → Player.
+                if (!store.hikariPlayerForced157()) {
+                    runCatching {
+                        store.setPlayerSkin(com.hikari.app.player.PlayerSkins.TESTING)
+                        store.setHikariPlayerForced157(true)
+                    }
+                }
                 syncTvPerformance(store)
                 syncTvEnhance(store)
                 store.tvModeFlow().distinctUntilChanged().collect { current ->
@@ -1010,6 +1036,10 @@ class HikariApp : Application() {
                 .connectionPool(ConnectionPool(24, 5, TimeUnit.MINUTES))
                 .connectTimeout(20, TimeUnit.SECONDS)
                 .readTimeout(30, TimeUnit.SECONDS)
+                // Clone-site host moves (see CloneHosts): posters scraped
+                // from a clone's pages name the old host — request the new
+                // one. Bodies are never touched here (images are bytes).
+                .addInterceptor(com.hikari.app.data.CloneHosts.requestInterceptor())
                 .addInterceptor { chain ->
                     val req = chain.request()
                     val host = req.url.host?.lowercase() ?: ""
@@ -1160,6 +1190,10 @@ class HikariApp : Application() {
                 .connectTimeout(20, TimeUnit.SECONDS)
                 .readTimeout(30, TimeUnit.SECONDS)
                 .apply { if (ignoreSSL) ignoreAllSSLErrors() }
+                // Clone-site mirroring FIRST (see CloneHosts): the plugin's
+                // own requests move to the clone's host before Cloudflare
+                // sees them, and HTML answers mirror back.
+                .addInterceptor(com.hikari.app.data.CloneHosts.mirrorInterceptor())
                 .addInterceptor(com.hikari.app.net.ExtensionCloudflareInterceptor { com.hikari.app.net.Http.UA })
                 .build()
 

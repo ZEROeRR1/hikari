@@ -107,6 +107,11 @@ class AppStore(private val ctx: Context) {
         val UI_SCALE_PERCENT = intPreferencesKey("uiScalePercent")
         /** Home Discovery rows (Top 10, trending, anime picks, in cinemas…). */
         val DISCOVERY_ROWS = booleanPreferencesKey("discoveryRows")
+        /** Home Explore-genres row (Settings → Customize). ON = shown. */
+        val EXPLORE_GENRES = booleanPreferencesKey("exploreGenres")
+        /** One-time reset: the 0.12.155 update turns Discovery rows OFF for
+         *  everyone who had them ON (they can turn them back on after). */
+        val DISCOVERY_ROWS_RESET_155 = booleanPreferencesKey("discoveryRowsReset155")
         val HISTORY = stringPreferencesKey("history")
         val HISTORY_PAUSED = booleanPreferencesKey("historyPaused")
         val HIDE_CONTINUE = booleanPreferencesKey("hideContinue")
@@ -470,6 +475,15 @@ class AppStore(private val ctx: Context) {
          *  percentage of its default size (see
          *  [DEFAULT_DETAIL_LOGO_SIZE]) — the wordmark art TMDB provides. */
         val DETAIL_LOGO_SIZE = intPreferencesKey("detailLogoSize")
+        /** Show the title LOGO art on the detail page's header + as the pinned
+         *  title on scroll (see [detailLogoEnabledFlow]). Default ON. */
+        val DETAIL_LOGO_ENABLED = booleanPreferencesKey("detailLogoEnabled")
+        /** Clone-site host overrides: clone provider id → JSON
+         *  `{"orig": origId, "main": mainNew, "hosts": {old: new}}`. */
+        val CLONE_HOSTS = stringPreferencesKey("cloneHosts")
+        /** Provider-picker chip order (see ProviderPickerSheet): ordered list of
+         *  chip keys ("ALL", ProviderType names, "CLONED", "WEBSITES"). */
+        val PROVIDER_KIND_ORDER = stringPreferencesKey("providerKindOrder")
         /** Which player control shell the player wears — see
          *  [com.hikari.app.player.PlayerSkins]. */
         val PLAYER_SKIN = stringPreferencesKey("playerSkin")
@@ -582,6 +596,12 @@ class AppStore(private val ctx: Context) {
         /** One-time migration for the new player UI defaults. User choices are preserved. */
         val PLAYER_UI_DEFAULTS_SEEDED = booleanPreferencesKey("playerUiDefaultsSeeded")
         val PLAYER_HIKARI_DEFAULTS_SEEDED = booleanPreferencesKey("playerHikariDefaultsSeeded")
+        /** One-time switch of every install's featured banner to Immersive 2
+         *  (0.12.156): runs once, users can pick another style after. */
+        val HERO_STYLE_SEEDED_156 = booleanPreferencesKey("heroStyleSeeded156")
+        /** One-time switch of every install's player to Hikari Player
+         *  (0.12.157): runs once, users can pick another skin after. */
+        val HIKARI_PLAYER_FORCED_157 = booleanPreferencesKey("hikariPlayerForced157")
         val TV_POSTER_SCALE = intPreferencesKey("tvPosterScale")
         val TV_DETAIL_BIG = booleanPreferencesKey("tvDetailBig")
         val TV_DETAIL_BIG_CHOSEN = booleanPreferencesKey("tvDetailBigChosen")
@@ -623,7 +643,8 @@ class AppStore(private val ctx: Context) {
             K.TV_SEEDED.name,
             K.PLAYER_UI_DEFAULTS_SEEDED.name,
             K.PLAYER_HIKARI_DEFAULTS_SEEDED.name,
-            K.TV_POSTER_SCALE.name,
+            K.HERO_STYLE_SEEDED_156.name,
+            K.HIKARI_PLAYER_FORCED_157.name,            K.TV_POSTER_SCALE.name,
             K.TV_TEXT_SCALE.name,
             K.TV_DETAIL_BIG.name,
             K.TV_BLUR_DETAIL.name,
@@ -887,11 +908,11 @@ class AppStore(private val ctx: Context) {
     suspend fun trackerRecommendationsSource(): String = trackerRecommendationsSourceFlow().first()
     suspend fun setTrackerRecommendationsSource(value: String) { write("TRACKER_RECOMMENDATIONS_SOURCE") { it[K.TRACKER_RECOMMENDATIONS_SOURCE] = value } }
 
-    /** Where the detail page's recommendations come from for a CloudStream (.cs3)
-     *  title (Settings -> Customize): "plugin" = the plugin's own list (what the
-     *  CloudStream app shows), falling back to TMDB only when the plugin returns
-     *  none; "tmdb" = always TMDB, as before; "both" = TMDB's Related and Similar
-     *  plus a standalone Recommended row with the plugin list. Default: plugin. */
+    /** Where the detail page's recommendations come from for an extension
+     *  title (Settings -> Customize): "plugin" = the same extension's own
+     *  list, falling back to TMDB only when the extension returns none;
+     *  "tmdb" = always TMDB, as before; "both" = TMDB's Related and Similar
+     *  plus a standalone Recommended row with the extension list. Default: plugin. */
     fun cs3RecommendationsSourceFlow(): Flow<String> =
         store.data.map {
             when (it[K.CS3_RECOMMENDATIONS_SOURCE]) {
@@ -1070,7 +1091,7 @@ class AppStore(private val ctx: Context) {
         val DEFAULT_POSTER_EFFECTS: Set<String> = emptySet()
 
         /** Home's featured banner shape ([HeroStyles]). */
-        const val DEFAULT_HERO_STYLE = com.hikari.app.ui.components.HeroStyles.SHOWCASE
+        const val DEFAULT_HERO_STYLE = com.hikari.app.ui.components.HeroStyles.IMMERSIVE2
         /** 100% = the size the featured banner has always been drawn at. */
         const val DEFAULT_HERO_SCALE = 100
 
@@ -1313,6 +1334,97 @@ class AppStore(private val ctx: Context) {
 
     suspend fun setDetailLogoSize(percent: Int) {
         write("DETAIL_LOGO_SIZE") { it[K.DETAIL_LOGO_SIZE] = percent.coerceIn(50, 160) }
+    }
+
+    /** Show the detail page's title-logo artwork (header + pinned title).
+     *  Default true — existing users see no change. */
+    fun detailLogoEnabledFlow(): Flow<Boolean> =
+        store.data.map { it[K.DETAIL_LOGO_ENABLED] ?: true }.distinctUntilChanged().flowOn(Dispatchers.Default)
+
+    suspend fun detailLogoEnabled(): Boolean = detailLogoEnabledFlow().first()
+
+    suspend fun setDetailLogoEnabled(on: Boolean) {
+        write("DETAIL_LOGO_ENABLED") { it[K.DETAIL_LOGO_ENABLED] = on }
+    }
+
+    // ---- Clone-site host overrides + provider chip order ----
+
+    /** Raw clone-host JSON (see [K.CLONE_HOSTS]). */
+    fun cloneHostsFlow(): Flow<Map<String, CloneEntry>> =
+        store.data.map { parseCloneHosts(it[K.CLONE_HOSTS]) }.distinctUntilChanged().flowOn(Dispatchers.Default)
+
+    suspend fun cloneHosts(): Map<String, CloneEntry> = cloneHostsFlow().first()
+
+    suspend fun saveClone(entry: CloneEntry) {
+        write("CLONE_HOSTS") { prefs ->
+            val cur = parseCloneHosts(prefs[K.CLONE_HOSTS]).toMutableMap()
+            cur[entry.id] = entry
+            prefs[K.CLONE_HOSTS] = encodeCloneHosts(cur)
+        }
+    }
+
+    suspend fun removeClone(id: String) {
+        write("CLONE_HOSTS") { prefs ->
+            val cur = parseCloneHosts(prefs[K.CLONE_HOSTS]).toMutableMap()
+            cur.remove(id)
+            prefs[K.CLONE_HOSTS] = encodeCloneHosts(cur)
+        }
+    }
+
+    private fun parseCloneHosts(s: String?): Map<String, CloneEntry> {
+        if (s.isNullOrBlank()) return emptyMap()
+        return try {
+            val o = JSONObject(s)
+            val out = LinkedHashMap<String, CloneEntry>()
+            val ids = o.keys()
+            while (ids.hasNext()) {
+                val id = ids.next()
+                val e = o.optJSONObject(id) ?: continue
+                val hosts = LinkedHashMap<String, String>()
+                val ho = e.optJSONObject("hosts")
+                if (ho != null) {
+                    val hk = ho.keys()
+                    while (hk.hasNext()) {
+                        val k = hk.next()
+                        hosts[k] = ho.optString(k)
+                    }
+                }
+                out[id] = CloneEntry(
+                    id = id,
+                    name = e.optString("name"),
+                    cloneOfId = e.optString("orig"),
+                    mainNew = e.optString("main").takeIf { it.isNotBlank() },
+                    hosts = hosts,
+                )
+            }
+            out
+        } catch (e: Exception) {
+            emptyMap()
+        }
+    }
+
+    private fun encodeCloneHosts(map: Map<String, CloneEntry>): String {
+        val o = JSONObject()
+        for ((id, e) in map) {
+            val hosts = JSONObject()
+            for ((k, v) in e.hosts) hosts.put(k, v)
+            o.put(id, JSONObject().put("name", e.name).put("orig", e.cloneOfId)
+                .put("main", e.mainNew.orEmpty()).put("hosts", hosts))
+        }
+        return o.toString()
+    }
+
+    /** Ordered provider-picker chip keys. Empty = default order. */
+    fun providerKindOrderFlow(): Flow<List<String>> =
+        store.data.map { prefs ->
+            prefs[K.PROVIDER_KIND_ORDER]?.split(",")?.map { it.trim() }
+                ?.filter { it.isNotEmpty() } ?: emptyList()
+        }.distinctUntilChanged().flowOn(Dispatchers.Default)
+
+    suspend fun providerKindOrder(): List<String> = providerKindOrderFlow().first()
+
+    suspend fun setProviderKindOrder(keys: List<String>) {
+        write("PROVIDER_KIND_ORDER") { it[K.PROVIDER_KIND_ORDER] = keys.joinToString(",") }
     }
 
     /** Which player control shell the player wears. */
@@ -1912,6 +2024,22 @@ fun searchExceptionOnFlow(): Flow<Boolean> =
 
     suspend fun setPlayerHikariDefaultsSeeded(seeded: Boolean) {
         write("PLAYER_HIKARI_DEFAULTS_SEEDED") { it[K.PLAYER_HIKARI_DEFAULTS_SEEDED] = seeded }
+    }
+
+    /** One-time Immersive 2 banner switch (0.12.156). */
+    suspend fun heroStyleSeeded156(): Boolean =
+        store.data.map { it[K.HERO_STYLE_SEEDED_156] ?: false }.first()
+
+    suspend fun setHeroStyleSeeded156(seeded: Boolean) {
+        write("HERO_STYLE_SEEDED_156") { it[K.HERO_STYLE_SEEDED_156] = seeded }
+    }
+
+    /** One-time Hikari Player switch (0.12.157). */
+    suspend fun hikariPlayerForced157(): Boolean =
+        store.data.map { it[K.HIKARI_PLAYER_FORCED_157] ?: false }.first()
+
+    suspend fun setHikariPlayerForced157(done: Boolean) {
+        write("HIKARI_PLAYER_FORCED_157") { it[K.HIKARI_PLAYER_FORCED_157] = done }
     }
 
     suspend fun setTvSeeded(seeded: Boolean) {
@@ -3392,10 +3520,25 @@ fun searchExceptionOnFlow(): Flow<Boolean> =
     /** Home Discovery rows (Top 10, trending, anime picks, in cinemas and
      *  more, matched to the picked extension). ON by default. */
     fun discoveryRowsFlow(): Flow<Boolean> =
-        store.data.map { it[K.DISCOVERY_ROWS] ?: true }.distinctUntilChanged().flowOn(Dispatchers.Default)
+        store.data.map { it[K.DISCOVERY_ROWS] ?: false }.distinctUntilChanged().flowOn(Dispatchers.Default)
 
     suspend fun setDiscoveryRows(enabled: Boolean) {
         write("DISCOVERY_ROWS") { it[K.DISCOVERY_ROWS] = enabled }
+    }
+
+    /** Home Explore-genres row. ON by default; the Search tab is unaffected. */
+    fun exploreGenresFlow(): Flow<Boolean> =
+        store.data.map { it[K.EXPLORE_GENRES] ?: true }.distinctUntilChanged().flowOn(Dispatchers.Default)
+
+    suspend fun setExploreGenres(enabled: Boolean) {
+        write("EXPLORE_GENRES") { it[K.EXPLORE_GENRES] = enabled }
+    }
+
+    suspend fun discoveryRowsReset155(): Boolean =
+        store.data.map { it[K.DISCOVERY_ROWS_RESET_155] ?: false }.first()
+
+    suspend fun setDiscoveryRowsReset155(done: Boolean) {
+        write("DISCOVERY_ROWS_RESET_155") { it[K.DISCOVERY_ROWS_RESET_155] = done }
     }
 
     /** When ON the app ignores the phone's Font size AND Display size settings

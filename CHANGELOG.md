@@ -1,4 +1,80 @@
 
+## 0.12.162
+
+- Fixed slow metadata loading, detail pages open much faster now
+- Added cloned site option, clone any extension to a new domain
+- Added new player UI, and the settings bar can be dragged around, just hold it for half a second
+- Added title art on/off toggle
+- Added playlist import by link in music, paste a YouTube or Spotify link and it plays
+- Added discovery rows with on/off toggle
+- Added new search tab UI
+- Fixed recommendations not showing for your own plugins
+- Added explore genres with on/off toggle
+- Added new banner style
+- Added streaming services row
+- Episode thumbnails now load from TMDB for all extensions
+- Mark episodes watched or watching manually with press-hold
+- Mark manga chapters reading or completed manually with press-hold
+- Provider chips can be moved now, hold for half a second and drag them where you want
+
+## 0.12.161
+
+- Cloned sites actually load now on every engine, not just some: catalogue, search, details, playback and web view all follow the new domain, including extensions whose code still names the old domain in its addresses and page parsing
+- Marking a manga or novel chapter Reading after Completed works again — the badge flips back instead of staying stuck on Completed
+
+## 0.12.160
+
+- Clone site screen has Cloned sites and All extensions tabs, with a delete button on every clone; one Clone site row everywhere instead of two
+- Clone site lives inside Settings → Sources & Extensions now — no more jump to the Extensions tab
+- Manga and novel chapters get the episode treatment: press-hold a chapter for half a second for a small Completed / Reading tile — slide and lift to mark
+
+## 0.12.159
+
+- Clone site asks only for the new domain — the old one is detected automatically, and clones now actually load from the new host across lists, details, playback and web view
+- Clone save buttons sit above the taskbar so Save is always visible and tappable
+- Clone site is also in Settings → Sources & Extensions and as a Cloned site folder in Sources, opening the same searchable extension list
+
+## 0.12.158
+
+- Details header gets a Title artwork toggle above the size slider — turn the title logo art off and the page shows a plain text title instead
+- Press-hold any episode for half a second for a small Watched / Watching tile — slide up or down and lift to mark, works on list rows, poster grids and big cards, and changes auto-marked episodes too
+- Clone site in Extensions → Installed extensions: pick any installed extension from the searchable list, set a new name and replacement domains, and the clone appears as its own extension with the same code and your new domains (original untouched)
+- New Cloned section in Select Provider next to Hikari, CloudStream and Nuvio — every clone lives there for direct picking
+- Provider chips are movable now: press-hold any chip for half a second, drag it anywhere and drop — the order saves and stays
+
+## 0.12.157
+
+- Episode thumbnails now actually land: anime and donghua are no longer skipped, and rows where the provider stamped the same poster on every episode prefer the real per-episode still instead
+- Recommended row can never show the opened title itself anymore, and same-extension picks rank by shared genres first, so similar series show up instead
+- This update switches everyone to Hikari Player (pick another player skin in Settings → Player if you want)
+
+## 0.12.156
+
+- Every episode row now shows its own thumbnail, rating and overview for all extensions, and episode art is a wide rectangle instead of a square — numbering, order and playback untouched
+- Featured banner switches to Immersive 2 for everyone on this update (pick another style in Settings → App layout if you want)
+- Recommendations source fixed: Original plugin shows a Recommended row from the same extension only, TMDB shows Related + Similar, TMDB + plugin shows all three
+
+## 0.12.155
+
+- Double-tap left/right skips 10s even while the player buttons are showing (double-tap middle plays/pauses, single tap still shows/hides)
+- This update turns Discovery rows OFF for everyone (turn them back on in Settings → Customize if you want them)
+- New Explore genres toggle in Settings → Customize: hides the genre tiles from Home only, the Search tab keeps them
+
+## 0.12.154
+
+- Player tool rail: stays exactly where you drop it up/down (no more sliding down); if it lands on any player item it sits just below that item instead of covering it
+- Search tab: "Try searching" chips and "Trending today" refresh from TMDB every day with a daily rotation, instead of the same fixed list
+
+## 0.12.153
+
+- Player tool rail: hold it half a second to lift it, drop it anywhere, it docks to the nearest edge and remembers the spot
+- Player header floats on the video without the dark bar
+
+## 0.12.152
+
+- Hikari Player fresh look: header card, accent play disc, ends-at seek row, side tool rail and icon-rail option panel with radio rows — all in your accent colour
+- Discovery rows are now off by default (turn back on in Settings → Customize)
+
 ## 0.12.151
 
 - Apple TV+ and Prime Video tiles use your transparent logos (black glyph / blue smile on transparency, verified on-tile): printed on the tile, no black or white pasted box, wide fill kept

@@ -48,15 +48,30 @@ object Http {
             .build()
     }
 
+    /** Reads a text body with clone mirroring: HTML fetched from a clone's
+     *  new host reads as the old host, so extensions whose parse patterns
+     *  name the old domain keep matching (see CloneHosts). */
+    private fun mirroredText(originalUrl: String, resp: Response): String? {
+        val text = resp.body?.string() ?: return null
+        return com.hikari.app.data.CloneHosts.mirrorResponseBody(
+            originalUrl,
+            resp.request.url.toString(),
+            resp.header("Content-Type"),
+            text,
+        )
+    }
+
     fun getQuiet(url: String, headers: Map<String, String> = emptyMap()): Response {
-        val builder = Request.Builder().url(url).header("User-Agent", UA)
+        // Clone-site host moves (see CloneHosts): scrape the new host.
+        val eff = com.hikari.app.data.CloneHosts.rewriteGlobal(url) ?: url
+        val builder = Request.Builder().url(eff).header("User-Agent", UA)
         headers.forEach { (k, v) -> builder.header(k, v) }
         // Prmovies 403 fix: probes and the safety-net fallback use getQuiet,
         // which bypassed the Cloudflare interceptor — so they never sent the
         // cf_clearance the Verify WebView earned. Attach it here too, under the
         // WebView UA the clearance was minted for (wrong UA gets rejected).
         if (builder.build().header("Cookie") == null) {
-            runCatching { CloudflareVerifier.clearanceFor(url) }
+            runCatching { CloudflareVerifier.clearanceFor(eff) }
                 .getOrNull()?.let {
                     builder.header("Cookie", it)
                     if (it.contains("cf_clearance")) {
@@ -73,13 +88,15 @@ object Http {
      *  does not exist is simply "nothing found"). */
     fun getStringQuiet(url: String, headers: Map<String, String> = emptyMap()): String? =
         try {
-            getQuiet(url, headers).use { if (it.isSuccessful) it.body?.string() else null }
+            getQuiet(url, headers).use { if (it.isSuccessful) mirroredText(url, it) else null }
         } catch (e: Exception) {
             null
         }
 
     fun get(url: String, headers: Map<String, String> = emptyMap()): Response {
-        val builder = Request.Builder().url(url).header("User-Agent", UA)
+        // Clone-site host moves (see CloneHosts): scrape the new host.
+        val eff = com.hikari.app.data.CloneHosts.rewriteGlobal(url) ?: url
+        val builder = Request.Builder().url(eff).header("User-Agent", UA)
         headers.forEach { (k, v) -> builder.header(k, v) }
         return client.newCall(builder.build()).execute()
     }
@@ -90,8 +107,9 @@ object Http {
         headers: Map<String, String> = emptyMap(),
         contentType: String = "application/json; charset=utf-8",
     ): Response {
+        val eff = com.hikari.app.data.CloneHosts.rewriteGlobal(url) ?: url
         val builder = Request.Builder()
-            .url(url)
+            .url(eff)
             .header("User-Agent", UA)
             .post(body.toRequestBody(contentType.toMediaType()))
         headers.forEach { (k, v) -> builder.header(k, v) }
@@ -106,7 +124,8 @@ object Http {
         contentType: String = "application/json; charset=utf-8",
     ): Response {
         if (method.equals("GET", ignoreCase = true) && body == null) return get(url, headers)
-        val builder = Request.Builder().url(url).header("User-Agent", UA)
+        val eff = com.hikari.app.data.CloneHosts.rewriteGlobal(url) ?: url
+        val builder = Request.Builder().url(eff).header("User-Agent", UA)
         builder.method(
             method,
             (body ?: "").toRequestBody(contentType.toMediaType()),
@@ -121,7 +140,7 @@ object Http {
         headers: Map<String, String> = emptyMap(),
         contentType: String = "application/json; charset=utf-8",
     ): String? = try {
-        post(url, body, headers, contentType).use { if (it.isSuccessful) it.body?.string() else null }
+        post(url, body, headers, contentType).use { if (it.isSuccessful) mirroredText(url, it) else null }
     } catch (e: Exception) {
         null
     }
@@ -132,20 +151,21 @@ object Http {
         headers: Map<String, String> = emptyMap(),
         contentType: String = "application/json; charset=utf-8",
     ): String? = try {
+        val eff = com.hikari.app.data.CloneHosts.rewriteGlobal(url) ?: url
         val builder = Request.Builder()
-            .url(url)
+            .url(eff)
             .header("User-Agent", UA)
             .post(body.toRequestBody(contentType.toMediaType()))
         headers.forEach { (k, v) -> builder.header(k, v) }
         quietClient.newCall(builder.build()).execute()
-            .use { if (it.isSuccessful) it.body?.string() else null }
+            .use { if (it.isSuccessful) mirroredText(url, it) else null }
     } catch (e: Exception) {
         null
     }
 
     fun getString(url: String, headers: Map<String, String> = emptyMap()): String? =
         try {
-            get(url, headers).use { if (it.isSuccessful) it.body?.string() else null }
+            get(url, headers).use { if (it.isSuccessful) mirroredText(url, it) else null }
         } catch (e: Exception) {
             null
         }
@@ -199,10 +219,12 @@ object Http {
     ): Result<String> =
         try {
             val call = clientFor(readTimeoutSec)
-            val builder = Request.Builder().url(url).header("User-Agent", UA)
+            // Clone-site host moves (see CloneHosts): scrape the new host.
+            val eff = com.hikari.app.data.CloneHosts.rewriteGlobal(url) ?: url
+            val builder = Request.Builder().url(eff).header("User-Agent", UA)
             headers.forEach { (k, v) -> builder.header(k, v) }
             call.newCall(builder.build()).execute().use { r ->
-                if (r.isSuccessful) Result.success(r.body?.string() ?: "")
+                if (r.isSuccessful) Result.success(mirroredText(url, r) ?: "")
                 else Result.failure(Exception("HTTP ${r.code} for $url"))
             }
         } catch (e: Exception) {

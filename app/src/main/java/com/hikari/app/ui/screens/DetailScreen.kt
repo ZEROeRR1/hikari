@@ -21,6 +21,9 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.aspectRatio
@@ -122,6 +125,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -233,6 +237,70 @@ import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.UUID
+
+/** Same-extension recommendations for ANY provider, not just CloudStream:
+ *  the site's own list when it ships one (CS3's LoadResponse), otherwise the
+ *  extension's own catalogue matched by the title's keywords, ranked by
+ *  shared genres, then its Popular rail. The opened title can never
+ *  recommend itself (matched by ID and by title). Items are ordinary
+ *  catalogue rows of that same extension, so they open straight into their
+ *  own page. Display only. */
+private suspend fun providerRecommendations(
+    provider: com.hikari.app.providers.ContentProvider?,
+    item: MediaItem,
+): List<MediaItem> {
+    if (provider == null) return emptyList()
+    (provider as? com.hikari.app.cs3.Cs3MainApiProvider)?.let {
+        return runCatching { it.getRecommendations(item) }.getOrDefault(emptyList())
+    }
+    fun normId(id: String) = id.trim().trimEnd('/').lowercase()
+    val selfId = normId(item.id)
+    val selfTitle = item.searchTitle.trim().lowercase()
+    fun isSelf(m: MediaItem): Boolean {
+        if (normId(m.id) == selfId) return true
+        val t = m.searchTitle.trim().lowercase()
+        return t.isNotBlank() && t == selfTitle
+    }
+    val words = item.searchTitle
+        .split(Regex("[^\\p{L}\\p{N}]+"))
+        .map { it.trim() }
+        .filter { it.length >= 4 }
+        .distinct()
+    val query = words.take(4).joinToString(" ").ifBlank { item.searchTitle.trim() }
+    val found = ArrayList<MediaItem>()
+    if (query.isNotBlank() && query.length >= 3) {
+        runCatching { provider.search(query, 1) }.getOrDefault(emptyList())
+            .filterNot(::isSelf)
+            .distinctBy { normId(it.id) }
+            .take(18)
+            .let { found += it }
+    }
+    if (found.size < 3) {
+        runCatching {
+            val refs = provider.catalogs()
+            val pop = refs.firstOrNull { it.id == "popular" } ?: refs.firstOrNull()
+            pop?.let { provider.getCatalog(it, 1) }.orEmpty()
+        }.getOrDefault(emptyList())
+            .filterNot(::isSelf)
+            .distinctBy { normId(it.id) }
+            .let { hits ->
+                for (h in hits) {
+                    if (found.none { normId(it.id) == normId(h.id) }) found += h
+                    if (found.size >= 30) break
+                }
+            }
+    }
+    if (found.isEmpty()) return emptyList()
+    // Same-kind series first: candidates sharing a genre with the opened
+    // title rank ahead, so a xianxia page suggests xianxia — the rest still
+    // fill the row when nothing shares a tag.
+    val tags = item.genres.map { it.trim().lowercase() }.filter { it.isNotBlank() }.toSet()
+    if (tags.isEmpty()) return found.take(18)
+    val matched = found.filter { m ->
+        m.genres.any { it.trim().lowercase() in tags }
+    }
+    return (if (matched.isNotEmpty()) matched + (found - matched.toSet()) else found).take(18)
+}
 
 class DetailViewModel(app: Application) : AndroidViewModel(app) {
     private val manager = (app as HikariApp).providers
@@ -581,14 +649,14 @@ class DetailViewModel(app: Application) : AndroidViewModel(app) {
     private val _similar = MutableStateFlow<List<MediaItem>>(emptyList())
     val similar: StateFlow<List<MediaItem>> = _similar.asStateFlow()
 
-    /** True when [related] holds the CloudStream plugin's OWN recommendations
+    /** True when [related] holds the extension's OWN recommendations
      *  (Settings -> Customize -> Recommendations source) rather than TMDB's. */
     private val _relatedFromPlugin = MutableStateFlow(false)
     val relatedFromPlugin: StateFlow<Boolean> = _relatedFromPlugin.asStateFlow()
 
-    /** The plugin's OWN recommendations as a standalone row (Settings ->
+    /** The extension's OWN recommendations as a standalone row (Settings ->
      *  Customize -> Recommendations source = "TMDB + plugin"): TMDB's
-     *  Related/Similar stay untouched and the plugin list renders under
+     *  Related/Similar stay untouched and the extension list renders under
      *  "Recommended". Empty unless the combined source is on and the plugin
      *  returned titles the TMDB lists don't already cover. */
     private val _recommended = MutableStateFlow<List<MediaItem>>(emptyList())
@@ -1301,23 +1369,23 @@ class DetailViewModel(app: Application) : AndroidViewModel(app) {
             val resolved = if (tmdbOk) runCatching {
                 com.hikari.app.data.MetaSources.resolveForShelves(item, docs)
             }.getOrNull() else null
-            // CloudStream (.cs3) titles: "plugin" shows the plugin's OWN
-            // recommendations in the Related row; "tmdb" always shows TMDB's
-            // Related/Similar; "both" (TMDB + plugin) shows TMDB's Related and
-            // Similar plus a standalone Recommended row with the plugin list.
-            // TMDB fills in whenever the plugin row is not used. The first
-            // (nav-args) pass leaves the plugin shelf to the second one: the
-            // plugin's load() response is cached by then, so the site is not
-            // asked twice — except in "both" mode, where the TMDB shelves
-            // still load on every pass.
+            // Any extension's OWN recommendations in the Related row when
+            // "plugin" is picked; "tmdb" always shows TMDB's Related/Similar;
+            // "both" (TMDB + plugin) shows TMDB's Related and Similar plus a
+            // standalone Recommended row with the extension's own list.
+            // TMDB fills in whenever the extension row is not used. The first
+            // (nav-args) pass leaves the extension shelf to the second one:
+            // the extension's load()/search response is cached by then, so
+            // the site is not asked twice — except in "both" mode, where the
+            // TMDB shelves still load on every pass.
             val recSrc = runCatching { HikariApp.instance.store.cs3RecommendationsSource() }
                 .getOrDefault("plugin")
-            val cs3 = manager.byId(item.providerId) as? com.hikari.app.cs3.Cs3MainApiProvider
+            val provider = manager.byId(item.providerId)
             // Every leg below only shares `resolved`: fan them out
             // concurrently instead of awaiting each in turn, so one pass
             // costs ~the slowest leg instead of the sum (instant detail).
             // The fast plugin pass still skips the TMDB shelves entirely.
-            val skipTmdbShelves = fastPass && recSrc == "plugin" && cs3 != null
+            val skipTmdbShelves = fastPass && recSrc == "plugin" && provider != null
             val exD = async {
                 if (tmdbOk) runCatching { TmdbMeta.extras(item, resolved) }.getOrNull() else null
             }
@@ -1327,12 +1395,12 @@ class DetailViewModel(app: Application) : AndroidViewModel(app) {
             val simTmdbD = if (skipTmdbShelves) null else async {
                 if (tmdbOk) runCatching { TmdbMeta.similar(item, 18, resolved) }.getOrDefault(emptyList()) else emptyList()
             }
-            val wantCs3 = cs3 != null && (recSrc == "plugin" || recSrc == "both") && !fastPass
+            val wantPlugin = provider != null && (recSrc == "plugin" || recSrc == "both") && !fastPass
             val cs3D = async {
-                val p = cs3
-                if (!wantCs3 || p == null) emptyList()
+                val p = provider
+                if (!wantPlugin || p == null) emptyList()
                 else try {
-                    withTimeoutOrNull(15_000L) { p.getRecommendations(item) }.orEmpty()
+                    withTimeoutOrNull(15_000L) { providerRecommendations(p, item) }.orEmpty()
                 } catch (e: kotlinx.coroutines.CancellationException) {
                     throw e
                 } catch (e: Throwable) {
@@ -1935,6 +2003,10 @@ fun DetailScreen(
     // Title logo size), in percent of the size it has always been drawn at.
     val detailLogoFlow = remember { detailApp.store.detailLogoSizeFlow() }
     val detailLogoPercent by detailLogoFlow.collectAsState(initial = 100)
+    // Title-artwork toggle (Settings → App Layout → Details header): OFF hides
+    // the wordmark everywhere (header + pinned title) and shows plain text.
+    val detailLogoOnFlow = remember { detailApp.store.detailLogoEnabledFlow() }
+    val detailLogoOn by detailLogoOnFlow.collectAsState(initial = true)
     val screenAlive = remember { java.util.concurrent.atomic.AtomicBoolean(true) }
     DisposableEffect(Unit) { onDispose { screenAlive.set(false) } }
     val onUi: suspend (() -> Unit) -> Unit = { block ->
@@ -2122,6 +2194,10 @@ fun DetailScreen(
     val loadingLogoPercent by remember { app.store.loadingLogoSizeFlow() }
         .collectAsState(initial = 100)
     var heroLogo by remember { mutableStateOf<String?>(null) }
+    // Effective wordmark: null when the title-artwork toggle is OFF, so every
+    // draw site below (header, pinned overlay, text fallback) falls back to
+    // plain text without touching the fetch.
+    val heroLogoEff: String? = if (detailLogoOn) heroLogo else null
     val askServerFlow = remember { app.store.askServerOnPlayFlow() }
     val askServerOnPlay by askServerFlow.collectAsState(initial = false)
     val playScopeAskOn by remember { app.store.playScopeAskFlow() }.collectAsState(initial = false)
@@ -3074,24 +3150,30 @@ fun DetailScreen(
     var showDlScope by remember { mutableStateOf(false) }
     val batchItem = m ?: savedItem
     val tvEpStills = remember { mutableStateMapOf<Pair<Int, Int>, String>() }
-    val tvEpMeta = remember { mutableStateMapOf<Pair<Int, Int>, Pair<String?, String?>>() }
+    // Per-episode TMDB title/overview/rating fallback for rows whose
+    // provider shipped none (TV cards + phone rows; display only).
+    val tvEpMeta = remember { mutableStateMapOf<Pair<Int, Int>, Triple<String?, String?, Double?>>() }
     val tvScreenshots = remember { mutableStateListOf<String>() }
     // Television banner owns the desktop rule: the title's own TMDB
     // backdrops (plural) rotate behind the page; provider art only when
     // TMDB has nothing, and never flashing before TMDB lands.
     val tvBgUrls = remember { mutableStateListOf<String>() }
     var tvBgIndex by remember { mutableStateOf(0) }
-    if (isTvLayout) {
+    // Episode stills feed every layout now, not just TV: the phone rows
+    // never got them, which is why every row showed the same poster art.
+    // Display only (keyed by season+number with a position fallback) —
+    // numbering, order, names and playback never change.
+    if (detailIsSeries) {
         LaunchedEffect(m?.uniqueId, sortedEps) {
             tvEpStills.clear()
             tvEpMeta.clear()
-            if (!detailIsSeries || sortedEps.isEmpty()) return@LaunchedEffect
+            if (sortedEps.isEmpty()) return@LaunchedEffect
             val data = TmdbStills.stillsDataFor(batchItem, sortedEps.map { it.season }.toSet())
             for ((season, ss) in data) {
                 for ((num, rec) in ss.byNumber) {
                     if (rec.still?.isNotBlank() == true) tvEpStills[season to num] = rec.still
-                    if (rec.name != null || rec.overview != null) {
-                        tvEpMeta[season to num] = rec.name to rec.overview
+                    if (rec.name != null || rec.overview != null || rec.rating != null) {
+                        tvEpMeta[season to num] = Triple(rec.name, rec.overview, rec.rating)
                     }
                 }
             }
@@ -3104,12 +3186,15 @@ fun DetailScreen(
                     if (!tvEpStills.containsKey(key)) {
                         rec?.still?.takeIf { it.isNotBlank() }?.let { tvEpStills[key] = it }
                     }
-                    if (!tvEpMeta.containsKey(key) && (rec?.name != null || rec?.overview != null)) {
-                        tvEpMeta[key] = rec?.name to rec?.overview
+                    if (!tvEpMeta.containsKey(key) && (rec?.name != null || rec?.overview != null || rec?.rating != null)) {
+                        tvEpMeta[key] = Triple(rec?.name, rec?.overview, rec?.rating)
                     }
                 }
             }
         }
+    }
+    // Television-only dressing below: rotating backdrops and screenshots.
+    if (isTvLayout) {
         LaunchedEffect(m?.uniqueId) {
             tvBgUrls.clear()
             tvBgIndex = 0
@@ -4599,6 +4684,8 @@ fun DetailScreen(
                                             sizeScale = tvEpisodeScale,
                                             glass = episodeGlass,
                                             hideSpoilers = antiSpoiler && !isEpSeen(ep),
+                                            watchState = epWatchState(ep),
+                                            onMarkEpisode = { w -> writeMark(ep, w) },
                                         )
                                     }
                                 }
@@ -4624,6 +4711,8 @@ fun DetailScreen(
                                             sizeScale = tvEpisodeScale,
                                             glass = episodeGlass,
                                             hideSpoilers = antiSpoiler && !isEpSeen(ep),
+                                            watchState = epWatchState(ep),
+                                            onMarkEpisode = { w -> writeMark(ep, w) },
                                         )
                                     }
                                 }
@@ -4679,8 +4768,9 @@ fun DetailScreen(
                         )
                         Spacer(Modifier.height(6.dp))
                     }
-                    if (!heroLogo.isNullOrBlank()) {
-                        AsyncImage(model = heroLogo, contentDescription = artTitle, contentScale = ContentScale.Fit,
+                    val heroLogoEff = if (detailLogoOn) heroLogo else null
+                    if (!heroLogoEff.isNullOrBlank()) {
+                        AsyncImage(model = heroLogoEff, contentDescription = artTitle, contentScale = ContentScale.Fit,
                             modifier = Modifier.fillMaxWidth(0.90f).heightIn(max = 96.dp))
                     } else {
                         Text(artTitle, fontSize = 24.sp * tvText, lineHeight = 30.sp * tvText, fontWeight = FontWeight.Bold,
@@ -4804,7 +4894,7 @@ fun DetailScreen(
     val logoRestFrac = (0.62f * logoScale).coerceIn(0.2f, 1f)
     val logoPinnedFrac = (0.34f * logoScale).coerceIn(0.17f, 0.72f)
     val logoFrac = logoRestFrac + (logoPinnedFrac - logoRestFrac) * headerProgress
-    val pinnedLogoDp = if (logoSizePx > 0 && logoFrac > 0.01f && !heroLogo.isNullOrBlank()) {
+    val pinnedLogoDp = if (logoSizePx > 0 && logoFrac > 0.01f && !heroLogoEff.isNullOrBlank()) {
         with(density) { (logoSizePx * logoPinnedFrac / logoFrac).toDp() }
     } else {
         0.dp
@@ -5080,7 +5170,7 @@ fun DetailScreen(
                             top = 16.dp + pinnedLogoDp * headerProgress,
                         )
                     ) {
-                        if (heroLogo.isNullOrBlank()) {
+                        if (heroLogoEff.isNullOrBlank()) {
                             Text(
                                 m?.title ?: title,
                                 style = MaterialTheme.typography.headlineMedium,
@@ -5769,6 +5859,12 @@ fun DetailScreen(
                             }
                         }
                     } else {
+                        // Providers that stamp the same poster on every
+                        // episode: prefer the TMDB still then, or each row
+                        // keeps the identical art and the stills never show.
+                        val pageSameArt = pageEps
+                            .mapNotNull { it.image?.trim().takeIf { s -> !s.isNullOrBlank() } }
+                            .toSet().size <= 1
                         if (episodeBigStyle) {
                             // Phone big cards ride a horizontal rail (TV
                             // already does): one LazyColumn item holding one
@@ -5787,12 +5883,16 @@ fun DetailScreen(
                                         EpisodeBigCard(
                                             ep = ep,
                                             fallbackImage = m?.backdropUrl ?: m?.posterUrl ?: posterUrl,
+                                            tmdbStill = tvEpStills[ep.season to ep.number],
+                                            tmdbFirst = pageSameArt,
                                             onClick = { tryPlay(ep) },
                                             onDownload = { tryDownload(ep) },
                                             modifier = Modifier.width(300.dp),
                                             sizeScale = tvEpisodeScale,
                                             glass = episodeGlass,
                                             hideSpoilers = antiSpoiler && !isEpSeen(ep),
+                                            watchState = epWatchState(ep),
+                                            onMarkEpisode = { w -> writeMark(ep, w) },
                                         )
                                     }
                                 }
@@ -5810,12 +5910,16 @@ fun DetailScreen(
                                             EpisodePosterCard(
                                                 ep = ep,
                                                 fallbackImage = m?.backdropUrl ?: m?.posterUrl ?: posterUrl,
+                                                tmdbStill = tvEpStills[ep.season to ep.number],
+                                                tmdbFirst = pageSameArt,
                                                 onClick = { tryPlay(ep) },
                                                 onDownload = { tryDownload(ep) },
                                                 modifier = Modifier.weight(1f),
                                                 sizeScale = tvEpisodeScale,
                                                 glass = episodeGlass,
                                                 hideSpoilers = antiSpoiler && !isEpSeen(ep),
+                                                watchState = epWatchState(ep),
+                                                onMarkEpisode = { w -> writeMark(ep, w) },
                                             )
                                         }
                                         repeat(3 - row.size) { Spacer(Modifier.weight(1f)) }
@@ -5828,12 +5932,17 @@ fun DetailScreen(
                                     EpisodeRow(
                                         ep,
                                         fallbackImage = m?.backdropUrl ?: m?.posterUrl ?: posterUrl,
+                                        tmdbStill = tvEpStills[ep.season to ep.number],
+                                        tmdbRating = tvEpMeta[ep.season to ep.number]?.third,
+                                        tmdbOverview = tvEpMeta[ep.season to ep.number]?.second,
+                                        tmdbFirst = pageSameArt,
                                         onClick = { tryPlay(ep) },
                                         onDownload = { tryDownload(ep) },
                                         sizeScale = tvEpisodeScale,
                                         glass = episodeGlass,
                                         hideSpoilers = antiSpoiler && !isEpSeen(ep),
                                         watchState = epWatchState(ep),
+                                        onMarkEpisode = { w -> writeMark(ep, w) },
                                     )
                                 }
                             }
@@ -5944,7 +6053,7 @@ fun DetailScreen(
         }
     }
 
-    val logoArt = heroLogo
+    val logoArt = heroLogoEff
     if (!logoArt.isNullOrBlank() && !(isTvLayout && episodePosterStyle)) {
         val logoHPx = logoSizePx.toFloat()
         val gapPx = with(density) { 10.dp.toPx() }
@@ -8525,6 +8634,12 @@ private fun EpisodePosterCard(
     glass: Boolean = false,
     /** Anti-spoiler: blur the still and mask the title/overview. */
     hideSpoilers: Boolean = false,
+    /** Per-episode watch state (see epWatchState): 0 = untouched, 1 =
+     *  watching, 2 = watched. */
+    watchState: Int = 0,
+    /** Manual mark (press-hold menu): true = Watched, false = Watching.
+     *  Null hides the menu (callers with nowhere to record). */
+    onMarkEpisode: ((watched: Boolean) -> Unit)? = null,
 ) {
     val s = (sizeScale * com.hikari.app.tv.TvUi.textScale()).coerceIn(0.5f, 2.4f)
     val tokens = rememberGlassTokens()
@@ -8533,7 +8648,9 @@ private fun EpisodePosterCard(
     val tvEp = com.hikari.app.tv.TvMode.current()
     val epCard = if (tvEp) RoundedCornerShape(com.hikari.app.tv.TvDesktop.CornerCard)
     else RoundedCornerShape(10.dp)
-    Column(
+    var markOpen by remember { mutableStateOf(false) }
+    var markHl by remember { mutableStateOf(-1) }
+    Box(
         (if (glass) {
             modifier
                 .clip(RoundedCornerShape(16.dp))
@@ -8544,7 +8661,22 @@ private fun EpisodePosterCard(
             modifier
                 .clip(epCard)
         })
-            .clickable(onClick = onClick)
+    ) {
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .episodeMarkGesture(
+                onClick = onClick,
+                enabled = onMarkEpisode != null,
+                onHoldOpen = { markHl = -1; markOpen = true },
+                onHighlight = { markHl = it },
+                onSlidePick = { hl ->
+                    if (hl == 0 || hl == 1) {
+                        onMarkEpisode?.invoke(hl == 0)
+                        markOpen = false
+                    }
+                },
+            )
             .tvPress(previewPass = false, onClick = onClick)
             .padding(bottom = (4f * s).dp)
     ) {
@@ -8664,6 +8796,16 @@ private fun EpisodePosterCard(
             )
         }
     }
+    if (onMarkEpisode != null) {
+        EpisodeMarkMenu(
+            expanded = markOpen,
+            watchState = watchState,
+            highlight = markHl,
+            onPick = { w -> onMarkEpisode.invoke(w); markOpen = false },
+            onDismiss = { markOpen = false },
+        )
+    }
+    }
 }
 
 private fun isEpisodeUnaired(released: String?): Boolean {
@@ -8701,9 +8843,12 @@ private fun isEpisodeUnaired(released: String?): Boolean {
 private fun EpisodeBigCard(
     ep: Episode,
     fallbackImage: String? = null,
-    /** TMDB still for this episode (TV only; desktop parity puts the still
-     *  first). Null keeps the old provider-first art. */
+    /** TMDB still for this episode (TV puts it first for desktop parity;
+     *  phones keep provider art first via [tmdbFirst]). Null keeps the old
+     *  provider-first art. */
     tmdbStill: String? = null,
+    /** TV puts the TMDB still first; phones keep provider art first. */
+    tmdbFirst: Boolean = true,
     onClick: () -> Unit,
     onDownload: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
@@ -8712,11 +8857,19 @@ private fun EpisodeBigCard(
     glass: Boolean = false,
     /** Anti-spoiler: blur the still and mask the title/overview. */
     hideSpoilers: Boolean = false,
+    /** Per-episode watch state (see epWatchState): 0 = untouched, 1 =
+     *  watching, 2 = watched. */
+    watchState: Int = 0,
+    /** Manual mark (press-hold menu): true = Watched, false = Watching.
+     *  Null hides the menu (callers with nowhere to record). */
+    onMarkEpisode: ((watched: Boolean) -> Unit)? = null,
 ) {
     val s = (sizeScale * com.hikari.app.tv.TvUi.textScale()).coerceIn(0.5f, 2.4f)
     val unaired = isEpisodeUnaired(ep.released)
     val tokens = rememberGlassTokens()
-    Column(
+    var markOpen by remember { mutableStateOf(false) }
+    var markHl by remember { mutableStateOf(-1) }
+    Box(
         (if (glass) {
             modifier
                 .clip(RoundedCornerShape(16.dp))
@@ -8727,7 +8880,22 @@ private fun EpisodeBigCard(
             modifier
                 .clip(RoundedCornerShape(12.dp))
         })
-            .clickable(onClick = onClick)
+    ) {
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .episodeMarkGesture(
+                onClick = onClick,
+                enabled = onMarkEpisode != null,
+                onHoldOpen = { markHl = -1; markOpen = true },
+                onHighlight = { markHl = it },
+                onSlidePick = { hl ->
+                    if (hl == 0 || hl == 1) {
+                        onMarkEpisode?.invoke(hl == 0)
+                        markOpen = false
+                    }
+                },
+            )
             .tvPress(previewPass = false, onClick = onClick)
             .padding(bottom = (6f * s).dp)
     ) {
@@ -8738,8 +8906,13 @@ private fun EpisodeBigCard(
                 .clip(RoundedCornerShape(12.dp))
                 .background(MaterialTheme.colorScheme.surfaceVariant)
         ) {
-            val thumbUrl = tmdbStill?.takeIf { it.isNotBlank() }
-                ?: ep.image?.takeIf { it.isNotBlank() } ?: fallbackImage
+            val thumbUrl = if (tmdbFirst) {
+                tmdbStill?.takeIf { it.isNotBlank() }
+                    ?: ep.image?.takeIf { it.isNotBlank() } ?: fallbackImage
+            } else {
+                ep.image?.takeIf { it.isNotBlank() }
+                    ?: tmdbStill?.takeIf { it.isNotBlank() } ?: fallbackImage
+            }
             // 16:9 card still: decode at card size, not full resolution (see
             // PosterLoader.cellModel) — full-size stills per card are part of
             // what makes the episode list scroll heavy.
@@ -8909,6 +9082,16 @@ private fun EpisodeBigCard(
             }
         }
     }
+    if (onMarkEpisode != null) {
+        EpisodeMarkMenu(
+            expanded = markOpen,
+            watchState = watchState,
+            highlight = markHl,
+            onPick = { w -> onMarkEpisode.invoke(w); markOpen = false },
+            onDismiss = { markOpen = false },
+        )
+    }
+    }
 }
 
 /** "1999-10-20" (or a longer stamp starting with it) printed the way the
@@ -8930,6 +9113,16 @@ private fun formatEpisodeDate(raw: String?): String? {
 private fun EpisodeRow(
     ep: Episode,
     fallbackImage: String? = null,
+    /** TMDB still/rating/overview for this episode (every extension gets
+     *  them now, phone rows included): shown only where the provider
+     *  shipped none. Display only — numbering, order, names and playback
+     *  never change. */
+    tmdbStill: String? = null,
+    tmdbRating: Double? = null,
+    tmdbOverview: String? = null,
+    /** The whole page shares one identical provider image: the TMDB still
+     *  wins, or every row would show that same art forever. */
+    tmdbFirst: Boolean = false,
     onClick: () -> Unit,
     /** Download this episode without watching it: the player opens on it and
      *  shows its own download chooser the moment a server is ready. Null hides
@@ -8944,13 +9137,18 @@ private fun EpisodeRow(
     /** Per-episode watch state (see epWatchState): 0 = untouched, 1 =
      *  watching, 2 = watched. Drawn as a small pill under the buttons. */
     watchState: Int = 0,
+    /** Manual mark (press-hold menu): true = Watched, false = Watching.
+     *  Null hides the menu (callers with nowhere to record). */
+    onMarkEpisode: ((watched: Boolean) -> Unit)? = null,
 ) {
     val s = (sizeScale * com.hikari.app.tv.TvUi.textScale()).coerceIn(0.5f, 2.4f)
     val tokens = rememberGlassTokens()
     // Television rows sit flat on the black page (desktop language) with
     // white/muted text; phones keep the near-page fill.
     val tvRow = com.hikari.app.tv.TvMode.current()
-    Row(
+    var markOpen by remember { mutableStateOf(false) }
+    var markHl by remember { mutableStateOf(-1) }
+    Box(
         (if (glass) {
             Modifier
                 .fillMaxWidth()
@@ -8966,18 +9164,36 @@ private fun EpisodeRow(
                     else com.hikari.app.ui.pageFill(0.98f)
                 )
         })
-            .clickable(onClick = onClick)
+    ) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .episodeMarkGesture(
+                onClick = onClick,
+                enabled = onMarkEpisode != null,
+                onHoldOpen = { markHl = -1; markOpen = true },
+                onHighlight = { markHl = it },
+                onSlidePick = { hl ->
+                    if (hl == 0 || hl == 1) {
+                        onMarkEpisode?.invoke(hl == 0)
+                        markOpen = false
+                    }
+                },
+            )
             .tvPress(previewPass = false, onClick = onClick)
             .padding(horizontal = (16f * s).dp, vertical = if (glass) 12.dp else (8f * s).dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        val thumb = PosterLoader.model(ep.image?.takeIf { it.isNotBlank() } ?: fallbackImage)
+        val providerArt = ep.image?.takeIf { it.isNotBlank() }
+        val tmdbArt = tmdbStill?.takeIf { it.isNotBlank() }
+        val thumb = PosterLoader.model(if (tmdbFirst) tmdbArt ?: providerArt ?: fallbackImage else providerArt ?: tmdbArt ?: fallbackImage)
         if (thumb != null) {
             AsyncImage(
                 model = thumb,
                 contentDescription = null,
                 modifier = Modifier
-                    .size((56f * s).dp)
+                    .width((100f * s).dp)
+                    .aspectRatio(16f / 9f)
                     .clip(RoundedCornerShape(8.dp))
                     .then(if (hideSpoilers) Modifier.blur(10.dp) else Modifier),
                 contentScale = ContentScale.Crop
@@ -8985,7 +9201,8 @@ private fun EpisodeRow(
         } else {
             Box(
                 Modifier
-                    .size(56.dp)
+                    .width(100.dp)
+                    .aspectRatio(16f / 9f)
                     .clip(RoundedCornerShape(8.dp))
                     .background(
                         if (tvRow) com.hikari.app.tv.TvDesktop.SurfaceElevated
@@ -9027,7 +9244,7 @@ private fun EpisodeRow(
                 )
             }
             val ratedLine = buildString {
-                ep.rating?.takeIf { it > 0.0 }?.let {
+                (ep.rating?.takeIf { it > 0.0 } ?: tmdbRating?.takeIf { it > 0.0 })?.let {
                     append(tr("Rated: %s").replace("%s", String.format(java.util.Locale.US, "%.1f", it)))
                 }
                 ep.runtime?.takeIf { it > 0 }?.let {
@@ -9056,9 +9273,10 @@ private fun EpisodeRow(
                 )
             }
             val showDescription = HikariApp.instance.store.episodeDescriptionFlow().collectAsState(initial = true).value
-            if (showDescription && (!ep.overview.isNullOrBlank() || hideSpoilers)) {
+            val tmdbOv = tmdbOverview?.takeIf { it.isNotBlank() }
+            if (showDescription && (!ep.overview.isNullOrBlank() || tmdbOv != null || hideSpoilers)) {
                 Text(
-                    if (hideSpoilers) tr("Hidden to avoid spoilers") else ep.overview!!.trim(),
+                    if (hideSpoilers) tr("Hidden to avoid spoilers") else (ep.overview?.takeIf { it.isNotBlank() } ?: tmdbOv!!).trim(),
                     style = MaterialTheme.typography.bodySmall.copy(
                         fontSize = (MaterialTheme.typography.bodySmall.fontSize.value * s).sp
                     ),
@@ -9101,12 +9319,140 @@ private fun EpisodeRow(
         }
         }
     }
+    if (onMarkEpisode != null) {
+        EpisodeMarkMenu(
+            expanded = markOpen,
+            watchState = watchState,
+            highlight = markHl,
+            onPick = { w -> onMarkEpisode.invoke(w); markOpen = false },
+            onDismiss = { markOpen = false },
+        )
+    }
+    }
 }
 
 /** Nuvio parity: season 0 is shown as "Specials" (never "Season 0"). */
 @Composable
 private fun seasonTitle(season: Int): String =
     if (season <= 0) tr("Specials") else tr("Season %s").replace("%s", season.toString())
+
+/** Press-hold (0.5s) slide-to-mark for episodes: a SMALL popup with Watched on
+ *  top and Watching below. Long-press opens it; without lifting the finger the
+ *  user slides up/down to highlight and lifts to select (a plain tap on a row
+ *  picks it too). Works both ways: fresh episodes get marked, and an
+ *  auto-marked Watched flips back to Watching (and vice versa). */
+@Composable
+private fun EpisodeMarkMenu(
+    expanded: Boolean,
+    watchState: Int,
+    highlight: Int,
+    onPick: (watched: Boolean) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    DropdownMenu(expanded = expanded, onDismissRequest = onDismiss) {
+        val hlWatched = highlight == 0
+        val hlWatching = highlight == 1
+        DropdownMenuItem(
+            text = {
+                Text(
+                    tr("Watched"),
+                    style = MaterialTheme.typography.labelMedium.copy(
+                        fontWeight = if (hlWatched || watchState == 2) FontWeight.Bold else FontWeight.Normal,
+                    ),
+                    color = if (hlWatched || watchState == 2) MaterialTheme.colorScheme.primary
+                    else MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1,
+                )
+            },
+            leadingIcon = {
+                Icon(
+                    Icons.Filled.CheckCircle,
+                    contentDescription = null,
+                    tint = if (hlWatched || watchState == 2) MaterialTheme.colorScheme.primary
+                    else MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(16.dp),
+                )
+            },
+            trailingIcon = if (watchState == 2) {
+                { Text("✓", color = MaterialTheme.colorScheme.primary) }
+            } else null,
+            onClick = { onPick(true) },
+        )
+        DropdownMenuItem(
+            text = {
+                Text(
+                    tr("Watching"),
+                    style = MaterialTheme.typography.labelMedium.copy(
+                        fontWeight = if (hlWatching || watchState == 1) FontWeight.Bold else FontWeight.Normal,
+                    ),
+                    color = if (hlWatching || watchState == 1) MaterialTheme.colorScheme.primary
+                    else MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1,
+                )
+            },
+            leadingIcon = {
+                Box(
+                    Modifier
+                        .size(16.dp)
+                        .border(
+                            1.5.dp,
+                            if (hlWatching || watchState == 1) MaterialTheme.colorScheme.primary
+                            else MaterialTheme.colorScheme.onSurfaceVariant,
+                            CircleShape,
+                        ),
+                )
+            },
+            trailingIcon = if (watchState == 1) {
+                { Text("✓", color = MaterialTheme.colorScheme.primary) }
+            } else null,
+            onClick = { onPick(false) },
+        )
+    }
+}
+
+/** Gesture modifier for [EpisodeMarkMenu]: tap passes through to [onClick],
+ *  a 0.5s hold opens the menu, and a continued slide selects on release
+ *  (up = Watched, down = Watching). Highlight is -1 until the finger moves;
+ *  releasing without a slide keeps the menu open for a tap instead. */
+@OptIn(ExperimentalFoundationApi::class)
+private fun Modifier.episodeMarkGesture(
+    onClick: () -> Unit,
+    enabled: Boolean,
+    onHoldOpen: () -> Unit,
+    onHighlight: (Int) -> Unit,
+    onSlidePick: (Int) -> Unit,
+): Modifier {
+    if (!enabled) return this.combinedClickable(onClick = onClick)
+    return this
+        .combinedClickable(
+            onClick = onClick,
+            onLongClick = { onHoldOpen() },
+        )
+        .pointerInput(enabled) {
+            var accum = 0f
+            var hl = -1
+            detectDragGesturesAfterLongPress(
+                onDragStart = {
+                    accum = 0f
+                    hl = -1
+                    onHighlight(-1)
+                    onHoldOpen()
+                },
+                onDrag = { change, amt ->
+                    change.consume()
+                    accum += amt.y
+                    hl = when {
+                        accum < -60f -> 0
+                        accum > 60f -> 1
+                        else -> -1
+                    }
+                    onHighlight(hl)
+                },
+                onDragEnd = { onSlidePick(hl) },
+                onDragCancel = { },
+            )
+        }
+}
 
 @Composable
 private fun EpisodeWatchBadge(
