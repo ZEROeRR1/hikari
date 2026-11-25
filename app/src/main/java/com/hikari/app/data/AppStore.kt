@@ -4012,7 +4012,7 @@ fun searchExceptionOnFlow(): Flow<Boolean> =
         val next = base + c
         saveCollections(next)
         return next
-
+    }
     suspend fun removeCollection(id: String) {
         saveCollections(collections().filter { it.id != id })
     }
