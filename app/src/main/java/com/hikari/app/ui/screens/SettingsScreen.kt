@@ -577,7 +577,6 @@ private fun searchSettings(rawQuery: String): List<SettingsSearchEntry> {
     )
     val out = ArrayList<SettingsSearchEntry>()
     for (f in SettingsFolder.entries) {
-        if (f == SettingsFolder.LOGS) continue
         val parent = f.parent?.let { pk -> SettingsFolder.entries.firstOrNull { it.key == pk } }
         out += SettingsSearchEntry(
             key = "folder-" + f.key,
@@ -839,7 +838,7 @@ fun SettingsScreen(nav: NavHostController) {
     // Top-level folders offered on this device — the TV left pane, and the
     // phone index below, read the same list so the two can never disagree.
     val tvTopFolders = remember(isTv) {
-        SettingsFolder.entries.filter { it.parent == null && it != SettingsFolder.LOGS && (!isTv || !it.phoneOnly) }
+        SettingsFolder.entries.filter { it.parent == null && (!isTv || !it.phoneOnly) }
     }
     val settingsListBody: LazyListScope.() -> Unit = {
         val folder = openFolder ?: if (isTv) tvTopFolders.firstOrNull() else null
@@ -1088,6 +1087,7 @@ fun SettingsScreen(nav: NavHostController) {
                     item { SettingsCard { Cs3RecommendationsCard(app) } }
                     item { SettingsCard { PlayerStyleCard(onOpen = { showPlayerStyle = true }) } }
                     item { SettingsCard { PlayerGesturesCard(onOpen = { showPlayerGestures = true }) } }
+                    item { SettingsCard { StreamingServicesCard(app) } }
                     item { SettingsCard { DiscoveryRowsCard(app) } }
                     item { SettingsCard { ExploreGenresCard(app) } }
                 }
@@ -1332,7 +1332,7 @@ fun SettingsScreen(nav: NavHostController) {
             }
             if (settingsQuery.isBlank()) {
             SettingsFolder.entries
-                .filter { it.parent == null && it != SettingsFolder.LOGS && (!isTv || !it.phoneOnly) }
+                .filter { it.parent == null && (!isTv || !it.phoneOnly) }
                 .forEach { target ->
                 item {
                     SettingsFolderRow(folder = target, onClick = { openFolderPage(target) })
@@ -1942,6 +1942,45 @@ private fun DiscoveryRowsCard(app: HikariApp) {
                 },
                 modifier = Modifier.tvToggle(on) { v ->
                     scope.launch { runCatching { app.store.setDiscoveryRows(v) } }
+                },
+            )
+        }
+    }
+}
+
+@Composable
+private fun StreamingServicesCard(app: HikariApp) {
+    val scope = rememberCoroutineScope()
+    val flow = remember { app.store.streamingServicesFlow() }
+    val on by flow.collectAsState(initial = true)
+    Column(Modifier.padding(16.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text(
+                    tr("Streaming services"),
+                    style = MaterialTheme.typography.titleSmall,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+                Spacer(Modifier.height(4.dp))
+                if (!LocalHideHelp.current) {
+                Text(
+                    tr(
+                        "The streaming service logos on Home. Off hides them there — " +
+                            "the Search tab keeps showing them."
+                    ),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                }
+            }
+            Spacer(Modifier.width(12.dp))
+            Switch(
+                checked = on,
+                onCheckedChange = { v ->
+                    scope.launch { runCatching { app.store.setStreamingServices(v) } }
+                },
+                modifier = Modifier.tvToggle(on) { v ->
+                    scope.launch { runCatching { app.store.setStreamingServices(v) } }
                 },
             )
         }
