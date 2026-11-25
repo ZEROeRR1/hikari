@@ -4006,10 +4006,12 @@ fun searchExceptionOnFlow(): Flow<Boolean> =
 
     /** Adds [c] (or replaces the same-id entry) and returns the saved list. */
     suspend fun upsertCollection(c: Collection): List<Collection> {
-        val next = collections().filter { it.id != c.id } + c
+        val base = collections().filter { it.id != c.id }.map {
+            if (c.openByDefault && it.openByDefault) it.copy(openByDefault = false) else it
+        }
+        val next = base + c
         saveCollections(next)
         return next
-    }
 
     suspend fun removeCollection(id: String) {
         saveCollections(collections().filter { it.id != id })
@@ -4516,6 +4518,7 @@ fun searchExceptionOnFlow(): Flow<Boolean> =
                     .put("coverValue", c.coverValue)
                     .put("tileShape", c.tileShape)
                     .put("pinToTop", c.pinToTop)
+                    .put("openByDefault", c.openByDefault)
                     .put("viewMode", c.viewMode)
                     .put("showAllTab", c.showAllTab)
                     .put("backdrop", c.backdropUrl)
@@ -4599,6 +4602,7 @@ fun searchExceptionOnFlow(): Flow<Boolean> =
                     coverValue = o.optString("coverValue"),
                     tileShape = TileShapes.normalize(o.optString("tileShape")),
                     pinToTop = o.optBoolean("pinToTop", false),
+                    openByDefault = o.optBoolean("openByDefault", false),
                     viewMode = CollectionViewModes.normalize(o.optString("viewMode")),
                     showAllTab = o.optBoolean("showAllTab", true),
                     backdropUrl = o.optString("backdrop"),
