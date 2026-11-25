@@ -341,12 +341,22 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {    private val m
         }
         viewModelScope.launch {
             restored.await()
+            var firstFlowEmission = true
             store.homeProvidersFlow().collect { multi ->
                 val single = runCatching { store.homeProvider() }.getOrDefault("")
                 val want = if (multi.isNotEmpty()) multi.toList()
                 else listOfNotNull(single.ifBlank { null })
-                if (want != _selection.value) {
-                    applySelection(want)
+                val effectiveWant = if (firstFlowEmission) {
+                    firstFlowEmission = false
+                    val defaultCol = runCatching {
+                        store.collections().firstOrNull { it.openByDefault }
+                    }.getOrNull()
+                    if (defaultCol != null) listOf("$COLLECTION_PREFIX${defaultCol.id}") else want
+                } else {
+                    want
+                }
+                if (effectiveWant != _selection.value) {
+                    applySelection(effectiveWant)
                     loadInternal()
                 }
             }
@@ -397,6 +407,10 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {    private val m
         picks: List<String>,
         saved: List<Collection>,
     ): kotlinx.coroutines.flow.Flow<List<CatalogRow>> {
+        val collectionPicks = picks
+            .filter { isCollectionKey(it) }
+            .mapNotNull { key -> saved.firstOrNull { it.id == collectionIdOf(key) } }
+        val collectionFlows = collectionPicks.map { collections.allRows(it) }
         val trackerKeys = picks.filter { isTrackerKey(it) }
         val extensionIds = picks.filterNot { isCollectionKey(it) || isTrackerKey(it) }.toSet()
         suspend fun trackerRows(): List<CatalogRow> {
@@ -419,13 +433,15 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {    private val m
         return when {
             // No pick means "All providers" — keep the normal extension feed.
             picks.isEmpty() -> repo.homeRowsStreaming()
-            trackerKeys.isNotEmpty() && extensionIds.isNotEmpty() ->
-                kotlinx.coroutines.flow.merge(
-                    trackerFlow,
-                    repo.homeRowsStreamingFor(extensionIds, allowManga),
-                )
-            trackerKeys.isNotEmpty() -> trackerFlow
-            extensionIds.isNotEmpty() -> repo.homeRowsStreamingFor(extensionIds, allowManga)
+            collectionFlows.isNotEmpty() || trackerKeys.isNotEmpty() || extensionIds.isNotEmpty() -> {
+                val parts = buildList {
+                    addAll(collectionFlows)
+                    if (trackerKeys.isNotEmpty()) add(trackerFlow)
+                    if (extensionIds.isNotEmpty()) add(repo.homeRowsStreamingFor(extensionIds, allowManga))
+                }
+                if (parts.size == 1) parts.first()
+                else kotlinx.coroutines.flow.merge(*parts.toTypedArray())
+            }
             else -> kotlinx.coroutines.flow.flowOf(emptyList())
         }
     }
@@ -473,7 +489,7 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {    private val m
         val soloPick = kept.singleOrNull()?.takeIf { !isCollectionKey(it) && !isTrackerKey(it) }
         lastLoadedCollection = folderCollection
         val cached = homeCache[key]
-        if (folderCollection != null) {
+        if (folderCollection != null && !folderCollection.openByDefault) {
             // Folders are already in memory (the collections store), so the
             // folder strip paints on the first frame; there is nothing to fetch.
             _rows.value = emptyList()
@@ -669,8 +685,9 @@ fun HomeScreen(nav: NavHostController) {
     val collectionFolderRows = (pickedCollections + pinnedCollections)
         .distinctBy { it.id }
         // A folder-less collection has no tiles to draw inside its row; on a pick
-        // the empty state below still explains it.
-        .filter { it.folders.isNotEmpty() }
+        // the empty state below still explains it. Collections set to open by
+        // default render their catalog rows directly instead of folder tiles.
+        .filter { it.folders.isNotEmpty() && !it.openByDefault }
     // What the empty state talks about when nothing loaded: the single pick, or
     // the first picked collection that turned out to have no folders at all.
     val emptyTalkCollection = selectedCollection
