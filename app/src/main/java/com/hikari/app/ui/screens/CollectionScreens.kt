@@ -763,6 +763,39 @@ private fun CollectionEditorPage(
                                 ),
                             )
                         }
+                                                HorizontalDivider(
+                            color = MaterialTheme.colorScheme.outline.copy(alpha = 0.22f),
+                            modifier = Modifier.padding(vertical = 10.dp),
+                        )
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Column(Modifier.weight(1f)) {
+                                Text(
+                                    tr("Open by default on launch"),
+                                    style = MaterialTheme.typography.titleSmall,
+                                    fontWeight = FontWeight.SemiBold,
+                                )
+                                if (!LocalHideHelp.current) {
+                                    Text(
+                                        tr(
+                                            "Automatically select this collection when Hikari opens " +
+                                                "so you don't have to pick it every time."
+                                        ),
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                            }
+                            Spacer(Modifier.width(12.dp))
+                            Switch(
+                                checked = collection.openByDefault,
+                                onCheckedChange = { onChange(collection.copy(openByDefault = it)) },
+                                modifier = Modifier.tvToggle(
+                                    collection.openByDefault,
+                                    onValueChange = { onChange(collection.copy(openByDefault = it)) },
+                                ),
+                            )
+                        }
+                        
                         HorizontalDivider(
                             color = MaterialTheme.colorScheme.outline.copy(alpha = 0.22f),
                             modifier = Modifier.padding(vertical = 10.dp),
