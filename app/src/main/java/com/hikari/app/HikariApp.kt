@@ -206,8 +206,7 @@ class HikariApp : Application() {
         // Diagnostics first: everything after this point is logged, and the
         // crash handler below needs the log directory to already exist.
         Logs.init(this)
-        Logs.log("App", "onCreate · version ${BuildConfig.VERSION_NAME} (build ${BuildConfig.VERSION_CODE}) sha ${BuildConfig.GIT_SHA}")
-        installCrashHandler()
+        runCatching { File(cacheDir, "crash.log").delete() }
         watchForTheUserClosingTheApp()
         startHeapWatcher()
         // Which kind of device this is — a phone/tablet or a television — asked
@@ -1214,26 +1213,7 @@ class HikariApp : Application() {
                 }
             }
 
-            CoroutineScope(Dispatchers.IO).launch {
-                val probes = listOf(
-                    "com.lagradost.cloudstream3.syncproviders.AccountManager",
-                    "com.lagradost.cloudstream3.databinding.ToastBinding",
-                    "com.lagradost.cloudstream3.CommonActivity",
-                    "com.lagradost.cloudstream3.R${'$'}string",
-                )
-                for (name in probes) {
-                    try {
-                        Class.forName(name)
-                        Logs.log("CloudStream", "pre-warm ok: $name")
-                    } catch (t: Throwable) {
-                        Logs.log(
-                            "CloudStream",
-                            "pre-warm FAILED: $name — ${t.javaClass.name}: ${t.message}" +
-                                (t.cause?.let { " (cause ${it.javaClass.name}: ${it.message})" } ?: ""),
-                        )
-                    }
-                }
-            }
+
         } catch (t: Throwable) {
             android.util.Log.e("HikariApp", "CloudStream runtime init failed", t)
         }
