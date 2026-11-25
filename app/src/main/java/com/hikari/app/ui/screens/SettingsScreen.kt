@@ -577,6 +577,7 @@ private fun searchSettings(rawQuery: String): List<SettingsSearchEntry> {
     )
     val out = ArrayList<SettingsSearchEntry>()
     for (f in SettingsFolder.entries) {
+        if (f == SettingsFolder.LOGS) continue
         val parent = f.parent?.let { pk -> SettingsFolder.entries.firstOrNull { it.key == pk } }
         out += SettingsSearchEntry(
             key = "folder-" + f.key,
@@ -838,7 +839,7 @@ fun SettingsScreen(nav: NavHostController) {
     // Top-level folders offered on this device — the TV left pane, and the
     // phone index below, read the same list so the two can never disagree.
     val tvTopFolders = remember(isTv) {
-        SettingsFolder.entries.filter { it.parent == null && (!isTv || !it.phoneOnly) }
+        SettingsFolder.entries.filter { it.parent == null && it != SettingsFolder.LOGS && (!isTv || !it.phoneOnly) }
     }
     val settingsListBody: LazyListScope.() -> Unit = {
         val folder = openFolder ?: if (isTv) tvTopFolders.firstOrNull() else null
@@ -1331,7 +1332,7 @@ fun SettingsScreen(nav: NavHostController) {
             }
             if (settingsQuery.isBlank()) {
             SettingsFolder.entries
-                .filter { it.parent == null && (!isTv || !it.phoneOnly) }
+                .filter { it.parent == null && it != SettingsFolder.LOGS && (!isTv || !it.phoneOnly) }
                 .forEach { target ->
                 item {
                     SettingsFolderRow(folder = target, onClick = { openFolderPage(target) })
