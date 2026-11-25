@@ -930,6 +930,7 @@ fun HomeScreen(nav: NavHostController) {
     val tvHome = TvMode.current()
     val discoveryOn by remember { app.store.discoveryRowsFlow() }.collectAsState(initial = false)
     val exploreGenresOn by remember { app.store.exploreGenresFlow() }.collectAsState(initial = true)
+    val streamingServicesOn by remember { app.store.streamingServicesFlow() }.collectAsState(initial = true)
     // The catalogue flavour follows the picked extension: donghua houses
     // show donghua rows, anime houses anime rows, everything else the
     // normal movie/series rows. Unknown extensions fall back to normal.
@@ -944,7 +945,7 @@ fun HomeScreen(nav: NavHostController) {
             else -> HomeFlavour.DEFAULT
         }
     }
-    val feedKeys = remember(uniqueRows, continueEntries, collectionFolderRows, loading, hideContinue, rows.isEmpty(), tvHome, selected, selection, discoveryOn, exploreGenresOn) {
+    val feedKeys = remember(uniqueRows, continueEntries, collectionFolderRows, loading, hideContinue, rows.isEmpty(), tvHome, selected, selection, discoveryOn, exploreGenresOn, streamingServicesOn) {
         buildList {
             add("home-header")
             if (!hideContinue && continueEntries.isNotEmpty()) add("continue-watching")
@@ -952,7 +953,7 @@ fun HomeScreen(nav: NavHostController) {
             // genres): right below Continue Watching, in every phone state —
             // picks narrow through the same scope question genres use.
             if (!tvHome) {
-                add("home-streaming")
+                if (streamingServicesOn) add("home-streaming")
                 if (discoveryOn) add("home-discovery")
                 if (exploreGenresOn) add("home-explore")
             }
@@ -1186,8 +1187,10 @@ fun HomeScreen(nav: NavHostController) {
             // Reference-style discovery rows: streaming logos + genre tiles.
             // A pick narrows through the same scope question genres use.
             if (!tvHome) {
-                item(key = "home-streaming") {
-                    HomeStreamingRow(onPickCompany = onPickCompany)
+                if (streamingServicesOn) {
+                    item(key = "home-streaming") {
+                        HomeStreamingRow(onPickCompany = onPickCompany)
+                    }
                 }
                 if (discoveryOn) {
                     item(key = "home-discovery") {
