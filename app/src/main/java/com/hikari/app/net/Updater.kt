@@ -91,24 +91,15 @@ object Updater {
     }
 
     /** Compares the running app version against the newest GitHub release. */
-    suspend fun checkForUpdate(): UpdateStatus = withContext(Dispatchers.IO) {
+        suspend fun checkForUpdate(): UpdateStatus {
         val current = currentVersion()
-        val rel = latestRelease()
-        if (rel == null || current == "unknown") {
-            return@withContext UpdateStatus(false, current, rel?.tag ?: "unknown")
-        }
-        val latest = rel.tag.removePrefix("v").ifBlank { rel.tag }
-        UpdateStatus(
-            available = isNewer(latest, current),
+        return UpdateStatus(
+            available = false,
             currentVersion = current,
-            latestVersion = latest,
-            apkUrl = if (rel.asset != null) {
-                "https://github.com/$REPO/releases/download/${rel.tag}/${rel.asset}"
-            } else {
-                UPDATE_URL
-            },
+            latestVersion = current,
         )
-    }
+        }
+        
 
     suspend fun download(
         context: Context,
