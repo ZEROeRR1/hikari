@@ -495,13 +495,6 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {    private val m
         val soloPick = kept.singleOrNull()?.takeIf { !isCollectionKey(it) && !isTrackerKey(it) }
         lastLoadedCollection = folderCollection
         val cached = homeCache[key]
-        if (folderCollection != null && !folderCollection.openByDefault) {
-            // Folders are already in memory (the collections store), so the
-            // folder strip paints on the first frame; there is nothing to fetch.
-            _rows.value = emptyList()
-            _loading.value = false
-            return
-        }
         if (cached != null && !forceRefresh) {
             // Stale-while-revalidate: show the previous feed immediately (no
             // spinner) and refresh underneath.
@@ -690,12 +683,13 @@ fun HomeScreen(nav: NavHostController) {
         .filter { it.startsWith(COLLECTION_PREFIX) }
         .mapNotNull { key -> collections.firstOrNull { it.id == key.removePrefix(COLLECTION_PREFIX) } }
     val pinnedCollections = if (selection.isEmpty()) collections.filter { it.pinToTop } else emptyList()
+    val pickedCollectionIds = remember(pickedCollections) { pickedCollections.map { it.id }.toSet() }
     val collectionFolderRows = (pickedCollections + pinnedCollections)
         .distinctBy { it.id }
         // A folder-less collection has no tiles to draw inside its row; on a pick
-        // the empty state below still explains it. Collections set to open by
-        // default render their catalog rows directly instead of folder tiles.
-        .filter { it.folders.isNotEmpty() && !it.openByDefault }
+        // the empty state below still explains it. Any picked collection opens
+        // its catalog rows directly instead of stopping at folder tiles first.
+        .filter { it.folders.isNotEmpty() && it.id !in pickedCollectionIds }
     // What the empty state talks about when nothing loaded: the single pick, or
     // the first picked collection that turned out to have no folders at all.
     val emptyTalkCollection = selectedCollection
