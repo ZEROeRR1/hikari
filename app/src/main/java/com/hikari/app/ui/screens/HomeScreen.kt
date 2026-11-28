@@ -455,7 +455,9 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {    private val m
     private suspend fun loadInternal(forceRefresh: Boolean = false) {
         loadJob?.cancel()
         val token = ++loadToken
-        if (manager.providers.value.isEmpty()) {
+        val prePicks = _selection.value
+        val needsProviders = prePicks.isEmpty() || prePicks.any { !isCollectionKey(it) && !isTrackerKey(it) }
+        if (needsProviders && manager.providers.value.isEmpty()) {
             val ready = kotlinx.coroutines.withTimeoutOrNull(20_000L) {
                 manager.providers.first { it.isNotEmpty() }
             }
@@ -541,8 +543,13 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {    private val m
                 val tokenized = withContext(Dispatchers.IO) {
                     rows.map { row ->
                         val ck = row.key.ifBlank { "${row.providerId}|${row.catalogId}|${row.title}" }
-                        tokenCache.getOrPut(ck) {
-                            row.copy(items = row.items.map { it.tokenizePoster() })
+                        val prev = tokenCache[ck]
+                        if (prev != null && prev.items === row.items) {
+                            prev
+                        } else {
+                            row.copy(items = row.items.map { it.tokenizePoster() }).also {
+                                tokenCache[ck] = it
+                            }
                         }
                     }
                 }

@@ -134,19 +134,505 @@ import com.hikari.app.HikariApp
 import com.hikari.app.cs3.Cs3MainApiProvider
 import com.hikari.app.cs3.Cs3PluginManager
 import com.hikari.app.hiki.HikariPluginManager
-import com.hikari.app.data.Cs3Repo
-import com.hikari.app.data.Cs3RepoPlugin
-import com.hikari.app.data.Logs
-import com.hikari.app.data.MediaType
-import com.hikari.app.data.ProviderConfig
-import com.hikari.app.data.ProviderType
-import com.hikari.app.data.RepoKind
-import com.hikari.app.data.RepoLoadState
-import com.hikari.app.data.RepoProvenance
-import com.hikari.app.data.Site
-import com.hikari.app.data.SourceUrls
-import com.hikari.app.net.Http
-import com.hikari.app.net.PromoGuard
+import com.hikari.app.datprivate fun RepoPluginsView(
+    repo: Cs3Repo,
+    plugins: List<Cs3RepoPlugin>,
+    state: RepoLoadState,
+    isBundle: Boolean = false,
+    providers: List<ContentProvider>,
+    installedUrls: Set<String>,
+    outdatedUrls: Set<String>,
+    busy: Boolean,
+    busyMsg: String,
+    successMsg: String?,
+    errorMsg: String?,
+    onBack: () -> Unit,
+    onRefresh: () -> Unit,
+    onInstall: (Cs3RepoPlugin) -> Unit,
+    onUninstall: (Cs3RepoPlugin) -> Unit,
+    onUpdate: (Cs3RepoPlugin) -> Unit,
+    /** True while a bulk install/update runs, and true again while it is
+     *  finishing the extension it is on (see [ExtensionsViewModel.stopBulkInstall]). */
+    installRunning: Boolean = false,
+    installStopping: Boolean = false,
+    onStopInstall: () -> Unit = {},
+    onOpenSettings: (ContentProvider) -> Unit,
+    onInstallAll: () -> Unit,
+    testStatus: Map<String, ProviderTest> = emptyMap(),
+    onTestInstalled: (String) -> Unit = {},
+    onTestDownload: (Cs3RepoPlugin) -> Unit = {},
+    /** Probes every installed provider from this repo at once. */
+    onTestAll: () -> Unit = {},
+    installedKinds: Map<String, String> = emptyMap(),
+) {
+    val retryFocus = remember { FocusRequester() }
+    val headerRefreshFocus = remember { FocusRequester() }
+    val backFocus = remember { FocusRequester() }
+    LaunchedEffect(Unit) {
+        if (!com.hikari.app.tv.TvMode.isTv) return@LaunchedEffect
+        runCatching { kotlinx.coroutines.delay(120) }
+        runCatching { backFocus.requestFocus() }
+    }
+
+    val cs3SettingsIds = rememberCs3SettingsIds(providers)
+    val tvRepoPage = com.hikari.app.tv.TvMode.current()
+    var filter by rememberSaveable { mutableStateOf("") }
+    // Which of the two kinds to show, when this repo holds both. "" = all.
+    var kindFilter by rememberSaveable { mutableStateOf("") }
+    fun kindOf(p: Cs3RepoPlugin): String =
+        installedKinds[p.pkg] ?: p.contentKind
+    val mangaCount = plugins.count { kindOf(it) == "manga" }
+    val animeCount = plugins.count { kindOf(it) == "anime" }
+    val mixed = mangaCount > 0 && animeCount > 0
+    val matched = remember(plugins, filter, kindFilter, installedKinds) {
+        plugins.filter { p ->
+            (kindFilter.isBlank() || kindOf(p) == kindFilter) &&
+                (filter.isBlank() ||
+                    p.name.contains(filter, ignoreCase = true) ||
+                    p.pkg.contains(filter, ignoreCase = true) ||
+                    p.description.contains(filter, ignoreCase = true))
+        }
+    }
+    val entries: List<RepoListEntry> = remember(matched, mixed, kindFilter, installedKinds) {
+        if (!mixed || kindFilter.isNotBlank()) {
+            matched.map { RepoListEntry.Row(it) }
+        } else {
+            buildList {
+                listOf(
+                    "anime" to I18n.t("Anime extensions"),
+                    "manga" to I18n.t("Manga extensions"),
+                ).forEach { (kind, title) ->
+                    val group = matched.filter { kindOf(it) == kind }
+                    if (group.isEmpty()) return@forEach
+                    add(RepoListEntry.Head(title, group.size))
+                    group.forEach { add(RepoListEntry.Row(it)) }
+                }
+                val rest = matched.filter { kindOf(it) != "anime" && kindOf(it) != "manga" }
+                if (rest.isNotEmpty()) {
+                    add(RepoListEntry.Head(I18n.t("Extensions"), rest.size))
+                    rest.forEach { add(RepoListEntry.Row(it)) }
+                }
+            }
+        }
+    }
+    val distinctEntries: List<RepoListEntry> = remember(entries) {
+        entries.distinctBy { it.key }
+    }
+    val installedMatchIndex = remember(providers, installedUrls) {
+        val byKey = HashMap<String, ContentProvider>(providers.size * 2)
+        val keysSet = HashSet<String>(installedUrls.size + providers.size * 2)
+        keysSet.addAll(installedUrls)
+        for (p in providers) {
+            val url = p.config.url
+            val id = p.config.id
+            if (url.isNotBlank()) {
+                byKey.putIfAbsent(url, p)
+                keysSet.add(url)
+            }
+            if (id.isNotBlank()) {
+                byKey.putIfAbsent(id, p)
+                keysSet.add(id)
+            }
+            val extra = p.config.extra ?: continue
+            val source = if (p.config.type == ProviderType.HIKARI) extra.substringBeforeLast('|') else extra
+            for (k in SourceUrls.matchKeys(source)) {
+                byKey.putIfAbsent(k, p)
+                keysSet.add(k)
+            }
+        }
+        Pair(byKey, keysSet)
+    }
+    val (installedByMatchKey, allInstalledMatchKeys) = installedMatchIndex
+    fun resolveInstalledProvider(plugin: Cs3RepoPlugin): ContentProvider? {
+        installedByMatchKey[plugin.url]?.let { return it }
+        if (com.hikari.app.kotatsu.fork.ForkVideoProvider.isForkVideoPluginUrl(plugin.url)) {
+            val oe = com.hikari.app.kotatsu.fork.ForkVideoProvider.ownerEnumOfPluginUrl(plugin.url)
+            if (oe != null) {
+                installedByMatchKey[com.hikari.app.kotatsu.fork.ForkVideoProvider.idOf(oe.first, oe.second)]?.let { return it }
+            }
+        }
+        if (plugin.url.startsWith(com.hikari.app.kotatsu.KotatsuRegistry.PLUGIN_SCHEME)) {
+            if (com.hikari.app.kotatsu.fork.ForkRegistry.isForkMangaPluginUrl(plugin.url)) {
+                val enum = com.hikari.app.kotatsu.fork.ForkRegistry.enumNameOfForkPluginUrl(plugin.url)
+                if (enum != null) {
+                    val fid = if (com.hikari.app.kotatsu.fork.ForkRegistry.isForkSkPluginUrl(plugin.url))
+                        com.hikari.app.kotatsu.fork.ForkRegistry.PREFIX_SK + enum
+                    else com.hikari.app.kotatsu.fork.ForkRegistry.PREFIX_HANY + enum
+                    installedByMatchKey[fid]?.let { return it }
+                }
+            }
+            val kid = com.hikari.app.kotatsu.KotatsuRegistry.PREFIX +
+                com.hikari.app.kotatsu.KotatsuRegistry.enumNameOfPluginUrl(plugin.url)
+            installedByMatchKey[kid]?.let { return it }
+        }
+        for (k in SourceUrls.matchKeys(plugin.url)) {
+            installedByMatchKey[k]?.let { return it }
+        }
+        return installedProviderFor(plugin, providers)
+    }
+    fun isPluginInstalledFast(pluginUrl: String): Boolean {
+        if (pluginUrl in allInstalledMatchKeys) return true
+        return SourceUrls.anyKeyIn(pluginUrl, allInstalledMatchKeys)
+    }
+    val headerCounts = remember(plugins, allInstalledMatchKeys, installedByMatchKey, testStatus) {
+        var u = 0
+        var i = 0
+        var t = 0
+        var o = 0
+        for (p in plugins) {
+            val isInst = isPluginInstalledFast(p.url)
+            if (!isInst && !isDartOnlyPlugin(p)) u++
+            if (isInst) i++
+            val target = resolveInstalledProvider(p)
+            val key = if (target != null) "inst::" + target.config.id else "repo::" + p.url
+            val st = testStatus[key]
+            if (st?.testing == true) t++
+            if (st?.ok == true) o++
+        }
+        intArrayOf(u, i, t, o)
+    }
+    val uninstalled = headerCounts[0]
+    val installedHere = headerCounts[1]
+    val testingHere = headerCounts[2]
+    val okHere = headerCounts[3]
+    Column(Modifier.fillMaxSize()) {
+        val unit = when (repo.kind) {
+            RepoKind.HIKARI -> "extension"
+            RepoKind.NUVIO -> "provider"
+            RepoKind.SKYSTREAM -> "extension"
+            RepoKind.ANIYOMI -> "extension"
+            RepoKind.VEGA -> "provider"
+            RepoKind.ZANGETSU -> "source"
+            RepoKind.LNREADER -> "source"
+            RepoKind.SORA -> "source"
+            RepoKind.KOTATSU -> "source"
+                                    RepoKind.ANYMEX -> "extension"
+            RepoKind.CS3 -> "plugin"
+        }
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .padding(start = 4.dp, end = 16.dp, top = 4.dp, bottom = 4.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            IconButton(onClick = onBack, modifier = Modifier.focusRequester(backFocus).tvPress(previewPass = true, onClick = onBack)) {
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = tr("Back"))
+            }
+            Column(Modifier.weight(1f)) {
+                Text(
+                    repo.name,
+                    style = MaterialTheme.typography.titleMedium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                if (repo.description.isNotBlank()) {
+                    Text(
+                        repo.description,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
+            Text(
+                "${plugins.size} ${unit}${if (plugins.size == 1) "" else "s"}",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.primary
+            )
+            IconButton(
+                onClick = onRefresh,
+                modifier = Modifier
+                    .focusRequester(headerRefreshFocus)
+                    .focusProperties { if (state.error != null) down = retryFocus }
+                    .tvPress(previewPass = true, onClick = onRefresh)
+            ) {
+                Icon(
+                    Icons.Filled.Refresh,
+                    contentDescription = tr("Refresh repo"),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+        HorizontalDivider()
+        if (state.loading || busy) {
+            LinearProgressIndicator(Modifier.fillMaxWidth())
+            if (busy) {
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        busyMsg,
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.weight(1f)
+                    )
+                    if (installRunning) {
+                        Spacer(Modifier.width(12.dp))
+                        OutlinedButton(onClick = onStopInstall, enabled = !installStopping) {
+                            Text(if (installStopping) tr("Stopping…") else tr("Stop"))
+                        }
+                    }
+                }
+            }
+        }
+        successMsg?.let { msg ->
+            Text(
+                msg,
+                color = MaterialTheme.colorScheme.primary,
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
+            )
+        }
+        errorMsg?.let { msg ->
+            Text(
+                msg,
+                color = MaterialTheme.colorScheme.error,
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
+            )
+        }
+        GlassSearchField(
+            value = filter,
+            onValueChange = { filter = it },
+            placeholder = tr("Search this repo…"),
+            height = 46.dp,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 6.dp),
+        )
+        if (mixed) {
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 2.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                RepoKindChip(
+                    label = I18n.t("All (%s)").replace("%s", plugins.size.toString()),
+                    selected = kindFilter.isBlank(),
+                ) { kindFilter = "" }
+                RepoKindChip(
+                    label = I18n.t("Manga (%s)").replace("%s", mangaCount.toString()),
+                    selected = kindFilter == "manga",
+                ) { kindFilter = if (kindFilter == "manga") "" else "manga" }
+                RepoKindChip(
+                    label = I18n.t("Anime (%s)").replace("%s", animeCount.toString()),
+                    selected = kindFilter == "anime",
+                ) { kindFilter = if (kindFilter == "anime") "" else "anime" }
+            }
+        }
+        LazyColumn(
+            // Repo browser position held per filter (see ScrollKeeper).
+            state = com.hikari.app.ui.components.keptListState("extRepos:$kindFilter"),
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f),
+            contentPadding = PaddingValues(
+                start = 16.dp,
+                end = 16.dp,
+                // Clear of the floating taskbar (0 when there is no bar).
+                bottom = LocalTaskbarInset.current + 24.dp,
+            )
+        ) {
+            if (plugins.isNotEmpty() && filter.isBlank() && kindFilter.isBlank()) {
+                item {
+                    OutlinedButton(
+                        onClick = onTestAll,
+                        enabled = testingHere == 0,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 4.dp, bottom = 4.dp)
+                            .height(48.dp),
+                        shape = RoundedCornerShape(16.dp)
+                    ) {
+                        Text(
+                            when {
+                                testingHere > 0 -> tr("Testing…") + " " + testingHere
+                                okHere > 0 -> tr("Test all") + " (" + okHere + "/" + installedHere + ")"
+                                else -> tr("Test all") + " (" + installedHere + ")"
+                            }
+                        )
+                    }
+                }
+            }
+            if (plugins.isNotEmpty() && uninstalled > 0 && filter.isBlank() && kindFilter.isBlank()) {
+                item {
+                    Button(
+                        onClick = onInstallAll,
+                        enabled = !busy,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 12.dp, bottom = 4.dp)
+                            .height(50.dp),
+                        shape = RoundedCornerShape(16.dp)
+                    ) {
+                        Icon(
+                            Icons.Filled.Download,
+                            contentDescription = null,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            tr("Install all (%s)").replace("%s", uninstalled.toString())
+                        )
+                    }
+                }
+            }
+            when {
+                state.loading && plugins.isEmpty() -> item {
+                    Text(
+                        "Loading ${unit}s…",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(vertical = 16.dp)
+                    )
+                }
+                state.error != null -> item {
+                    Text(
+                        state.error,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.padding(vertical = 16.dp)
+                    )
+                    TextButton(
+                        onClick = onRefresh,
+                        modifier = Modifier
+                            .focusRequester(retryFocus)
+                            .focusProperties { up = headerRefreshFocus }
+                            .tvPress(previewPass = true, onClick = onRefresh)
+                    ) { Text(tr("Retry")) }
+                }
+                plugins.isEmpty() && isBundle -> item {
+                        Text(
+                            I18n.t(
+                                "This is a bundle repo — it holds no %s of its own. Its repos were " +
+                                    "added to your repo list: open Phisher, CNC, CSX… and install %s from there."
+                            ).replace("%s", "${unit}s"),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(vertical = 16.dp)
+                    )
+                }
+                plugins.isEmpty() -> item {
+                    Text(
+                        I18n.t("No %s found in this repo.").replace("%s", "${unit}s"),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(vertical = 16.dp)
+                    )
+                }
+                matched.isEmpty() -> item {
+                    Text(
+                        I18n.t("Nothing in this repo matches \"%s\".").replace("%s", filter.ifBlank { kindFilter }),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(vertical = 16.dp)
+                    )
+                }
+                else -> {
+                    if (tvRepoPage) {
+                        // TV: the reference 2-per-row plugin grid. Group
+                        // headers stay full-width; consecutive plugin entries
+                        // pair into one grid line (never across a header).
+                        var tvIndex = 0
+                        while (tvIndex < distinctEntries.size) {
+                            val head = distinctEntries[tvIndex] as? RepoListEntry.Head
+                            if (head != null) {
+                                item(key = head.key) { RepoGroupHeader(head.title, head.count) }
+                                tvIndex += 1
+                                continue
+                            }
+                            val first = distinctEntries[tvIndex] as? RepoListEntry.Row
+                            if (first == null) { tvIndex += 1; continue }
+                            val second = distinctEntries.getOrNull(tvIndex + 1) as? RepoListEntry.Row
+                            item(key = "tvplug-" + first.key + "|" + (second?.key ?: "single")) {
+                                Row(
+                                    Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 20.dp, vertical = 6.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                                ) {
+                                    Box(Modifier.weight(1f)) {
+                                        TvPluginCardEntry(
+                                            p = first.plugin,
+                                            repo = repo,
+                                            providers = providers,
+                                            installedUrls = allInstalledMatchKeys,
+                                            outdatedUrls = outdatedUrls,
+                                            onInstall = { onInstall(first.plugin) },
+                                            onUninstall = { onUninstall(first.plugin) },
+                                            onUpdate = { onUpdate(first.plugin) },
+                                            onOpenSettings = onOpenSettings,
+                                            cs3SettingsIds = cs3SettingsIds,
+                                        )
+                                    }
+                                    if (second != null) {
+                                        Box(Modifier.weight(1f)) {
+                                            TvPluginCardEntry(
+                                                p = second.plugin,
+                                                repo = repo,
+                                                providers = providers,
+                                                installedUrls = allInstalledMatchKeys,
+                                                outdatedUrls = outdatedUrls,
+                                                onInstall = { onInstall(second.plugin) },
+                                                onUninstall = { onUninstall(second.plugin) },
+                                                onUpdate = { onUpdate(second.plugin) },
+                                                onOpenSettings = onOpenSettings,
+                                                cs3SettingsIds = cs3SettingsIds,
+                                            )
+                                        }
+                                    } else {
+                                        Spacer(Modifier.weight(1f))
+                                    }
+                                }
+                            }
+                            tvIndex += if (second != null) 2 else 1
+                        }
+                    } else {
+                        items(distinctEntries, key = { it.key }) { entry ->
+                    when (entry) {
+                        is RepoListEntry.Head -> RepoGroupHeader(entry.title, entry.count)
+                        is RepoListEntry.Row -> {
+                            val p = entry.plugin
+                            val target = resolveInstalledProvider(p)
+                            val statusKey = if (target != null) "inst::" + target.config.id else "repo::" + p.url
+                            val testState = testStatus[statusKey]
+                            val isInst = isPluginInstalledFast(p.url)
+                            val isOutdated = isPluginInstalledFast(p.url) && SourceUrls.anyKeyIn(p.url, outdatedUrls)
+                            PluginRow(
+                                p = p,
+                                installed = isInst,
+                                onInstall = { onInstall(p) },
+                                onUninstall = { onUninstall(p) },
+                                testText = testState?.text,
+                                testOk = testState?.ok == true,
+                                testing = testState?.testing == true,
+                                onTest = {
+                                    if (target != null) onTestInstalled(target.config.id)
+                                    else onTestDownload(p)
+                                },
+                                onSettings = repoPluginSettingsTarget(p, providers, cs3SettingsIds)
+                                    ?.let { t -> { onOpenSettings(t) } },
+                                updateAvailable = isOutdated,
+                                onUpdate = { onUpdate(p) },
+                                kind = repo.kind,
+                                repoUrl = repo.url,
+                            )
+                        }
+                    }
+                }
+                }
+            }
+            }
+        }
+    }
+}
+
+@Composableapp.net.PromoGuard
 import com.hikari.app.providers.ContentProvider
 import com.hikari.app.providers.ProviderManager
 import com.hikari.app.ui.FlagIcon
